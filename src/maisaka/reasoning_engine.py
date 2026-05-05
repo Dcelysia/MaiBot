@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 logger = get_logger("maisaka_reasoning_engine")
 
 TIMING_GATE_CONTEXT_DROP_HEAD_RATIO = 0.7
-TIMING_GATE_MAX_TOKENS = 384
+TIMING_GATE_MAX_TOKENS = 24000
 TIMING_GATE_MAX_ATTEMPTS = 3
 TIMING_GATE_TOOL_NAMES = {"continue", "no_reply", "wait"}
 HISTORY_SILENT_TOOL_NAMES = {"finish"}
@@ -185,6 +185,8 @@ class MaisakaReasoningEngine:
         for tool_spec in tool_specs:
             if tool_spec.provider_name == "maisaka_builtin":
                 if not is_builtin_tool_in_action_stage(tool_spec):
+                    continue
+                if tool_spec.name == "proactive_reply" and not self._runtime.is_auto_chat_turn_active():
                     continue
                 visibility = get_builtin_tool_visibility(tool_spec)
                 if visibility == "visible":
@@ -421,7 +423,9 @@ class MaisakaReasoningEngine:
         try:
             while self._runtime._running:
                 queued_trigger = await self._runtime._internal_turn_queue.get()
-                message_triggered, timeout_triggered = self._drain_ready_turn_triggers(queued_trigger)
+                message_triggered, timeout_triggered, proactive_triggered = self._drain_ready_turn_triggers(
+                    queued_trigger
+                )
 
                 if self._runtime._agent_state == self._runtime._STATE_WAIT and not timeout_triggered:
                     self._runtime._message_turn_scheduled = False
@@ -433,19 +437,27 @@ class MaisakaReasoningEngine:
                 if message_triggered:
                     await self._runtime._wait_for_message_quiet_period()
                     self._runtime._message_turn_scheduled = False
+                if proactive_triggered:
+                    self._runtime._message_turn_scheduled = False
 
                 cached_messages = (
                     self._runtime._collect_pending_messages()
                     if self._runtime._has_pending_messages()
                     else []
                 )
-                if not timeout_triggered and not cached_messages:
+                if cached_messages and proactive_triggered:
+                    proactive_triggered = False
+                if not timeout_triggered and not proactive_triggered and not cached_messages:
                     continue
 
                 self._runtime._agent_state = self._runtime._STATE_RUNNING
                 self._runtime._update_stage_status(
                     "消息整理",
-                    f"待处理消息 {len(cached_messages)} 条" if cached_messages else "准备复用超时锚点",
+                    f"待处理消息 {len(cached_messages)} 条"
+                    if cached_messages
+                    else "准备主动聊天"
+                    if proactive_triggered
+                    else "准备复用超时锚点",
                 )
                 if cached_messages:
                     asyncio.create_task(self._runtime._trigger_batch_learning(cached_messages))
@@ -459,15 +471,21 @@ class MaisakaReasoningEngine:
                     anchor_message = self._get_timeout_anchor_message()
                     if anchor_message is None:
                         logger.warning(
-                            f"{self._runtime.log_prefix} 等待超时后缺少可复用的锚点消息，跳过本轮继续思考"
+                            f"{self._runtime.log_prefix} 缺少可复用的锚点消息，跳过本轮继续思考"
                         )
                         continue
-                    logger.info(f"{self._runtime.log_prefix} 等待超时后开始新一轮思考")
-                    if self._runtime._pending_wait_tool_call_id:
+                    if proactive_triggered:
+                        logger.info(f"{self._runtime.log_prefix} 空闲触发自动聊天思考")
+                        self._runtime._chat_history.append(self._runtime.build_auto_chat_reference_message())
+                    else:
+                        logger.info(f"{self._runtime.log_prefix} 等待超时后开始新一轮思考")
+                    if timeout_triggered and self._runtime._pending_wait_tool_call_id:
                         self._runtime._chat_history.append(
                             self._build_wait_completed_message(has_new_messages=False)
                         )
                 try:
+                    if proactive_triggered:
+                        self._runtime.begin_auto_chat_turn()
                     timing_gate_required = True
                     for round_index in range(self._runtime._max_internal_rounds):
                         cycle_detail = self._start_cycle()
@@ -714,6 +732,8 @@ class MaisakaReasoningEngine:
                                 agent_state=self._runtime._agent_state,
                             )
                 finally:
+                    if proactive_triggered:
+                        self._runtime.end_auto_chat_turn()
                     if self._runtime._agent_state == self._runtime._STATE_RUNNING:
                         self._runtime._agent_state = self._runtime._STATE_STOP
                     if self._runtime._running:
@@ -728,12 +748,13 @@ class MaisakaReasoningEngine:
 
     def _drain_ready_turn_triggers(
         self,
-        queued_trigger: Literal["message", "timeout"],
-    ) -> tuple[bool, bool]:
+        queued_trigger: Literal["message", "timeout", "proactive"],
+    ) -> tuple[bool, bool, bool]:
         """合并当前已就绪的 turn 触发信号。"""
 
         message_triggered = queued_trigger == "message"
         timeout_triggered = queued_trigger == "timeout"
+        proactive_triggered = queued_trigger == "proactive"
 
         while True:
             try:
@@ -747,8 +768,11 @@ class MaisakaReasoningEngine:
             if next_trigger == "timeout":
                 timeout_triggered = True
                 continue
+            if next_trigger == "proactive":
+                proactive_triggered = True
+                continue
 
-        return message_triggered, timeout_triggered
+        return message_triggered, timeout_triggered, proactive_triggered
 
     def _get_timeout_anchor_message(self) -> Optional[SessionMessage]:
         """在 wait 超时后复用最近一条真实用户消息作为锚点。"""

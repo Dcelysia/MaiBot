@@ -203,6 +203,48 @@ class ChatConfig(ConfigBase):
     inevitable_at_reply: bool = Field(default=True)
     """是否启用at必回复"""
 
+    enable_auto_chat: bool = Field(
+        default=True,
+        json_schema_extra={
+            "x-widget": "switch",
+            "x-icon": "sparkles",
+        },
+    )
+    """是否启用空闲时自动发起聊天"""
+
+    auto_chat_idle_seconds: int = Field(
+        default=1800,
+        ge=60,
+        json_schema_extra={
+            "x-widget": "input",
+            "x-icon": "timer",
+        },
+    )
+    """自动发起聊天前需要保持空闲的秒数"""
+
+    auto_chat_check_interval_seconds: int = Field(
+        default=60,
+        ge=10,
+        json_schema_extra={
+            "x-widget": "input",
+            "x-icon": "clock",
+        },
+    )
+    """自动聊天空闲检查间隔，单位秒"""
+
+    auto_chat_prompt: str = Field(
+        default=(
+            "当前聊天已经安静了一段时间。你可以像普通群友或朋友一样自然地发起一个轻量话题，"
+            "也可以只发表情包，或者判断现在不适合打扰而结束本轮。"
+            "不要为了发言而发言；优先结合近期上下文、共同经历、时间段和对方可能感兴趣的内容。"
+        ),
+        json_schema_extra={
+            "x-widget": "textarea",
+            "x-icon": "message-circle-plus",
+        },
+    )
+    """_wrap_自动聊天触发时给 Planner 的额外提示"""
+
     enable_at: bool = Field(
         default=True,
         json_schema_extra={

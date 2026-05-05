@@ -122,7 +122,7 @@ class EmojiComponent(BaseMessageComponentModel, ByteComponent):
     async def to_seg(self) -> Seg:
         if not self.binary_data:
             await self.load_emoji_binary()
-        return Seg(type="emoji", data=base64.b64encode(self.binary_data).decode())
+        return Seg(type="image", data=base64.b64encode(self.binary_data).decode())
 
 
 class VoiceComponent(BaseMessageComponentModel, ByteComponent):

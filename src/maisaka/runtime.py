@@ -84,7 +84,7 @@ class MaisakaHeartFlowChatting:
         # Keep all original messages for batching and later learning.
         self.message_cache: list[SessionMessage] = []
         self._last_processed_index = 0
-        self._internal_turn_queue: asyncio.Queue[Literal["message", "timeout"]] = asyncio.Queue()
+        self._internal_turn_queue: asyncio.Queue[Literal["message", "timeout", "proactive"]] = asyncio.Queue()
 
         self._mcp_manager: Optional[MCPManager] = None
         self._mcp_host_bridge: Optional[MCPHostLLMBridge] = None
@@ -103,6 +103,10 @@ class MaisakaHeartFlowChatting:
         self._reply_latency_measurement_started_at: Optional[float] = None
         self._recent_reply_latencies: deque[tuple[float, float]] = deque()
         self._wait_timeout_task: Optional[asyncio.Task[None]] = None
+        self._auto_chat_task: Optional[asyncio.Task[None]] = None
+        self._last_auto_chat_activity_at = time.time()
+        self._last_auto_chat_trigger_at = 0.0
+        self._auto_chat_turn_active = False
         self._max_internal_rounds = MAX_INTERNAL_ROUNDS
         configured_context_size = (
             global_config.chat.max_context_size
@@ -174,6 +178,7 @@ class MaisakaHeartFlowChatting:
 
         self._running = True
         self._ensure_background_tasks_running()
+        self._ensure_auto_chat_task_running()
         self._schedule_message_turn()
         self._update_stage_status("空闲", "等待消息触发")
         logger.info(f"{self.log_prefix} Maisaka 运行时已启动")
@@ -187,6 +192,7 @@ class MaisakaHeartFlowChatting:
         self._message_turn_scheduled = False
         self._message_debounce_required = False
         self._cancel_deferred_message_turn_task()
+        self._cancel_auto_chat_task()
         self._cancel_wait_timeout_task()
         while not self._internal_turn_queue.empty():
             _ = self._internal_turn_queue.get_nowait()
@@ -246,6 +252,7 @@ class MaisakaHeartFlowChatting:
                 source_kind=source_kind,
             )
             self._chat_history.append(history_message)
+            self._last_auto_chat_activity_at = time.time()
             return True
         except Exception as exc:
             logger.warning(
@@ -258,8 +265,10 @@ class MaisakaHeartFlowChatting:
         """缓存一条新消息并唤醒主循环。"""
         if self._running:
             self._ensure_background_tasks_running()
+            self._ensure_auto_chat_task_running()
         received_at = time.time()
         self._last_message_received_at = received_at
+        self._last_auto_chat_activity_at = received_at
         self._update_message_trigger_state(message)
         self.message_cache.append(message)
         self._message_received_at_by_id[message.message_id] = received_at
@@ -423,6 +432,7 @@ class MaisakaHeartFlowChatting:
 
     def _record_reply_sent(self) -> None:
         """在成功发送 reply 后记录本轮消息回复时长。"""
+        self._last_auto_chat_activity_at = time.time()
         if self._reply_latency_measurement_started_at is None:
             return
 
@@ -580,6 +590,124 @@ class MaisakaHeartFlowChatting:
                     logger.error(f"{self.log_prefix} 内部循环任务异常退出: {exc}")
             self._internal_loop_task = asyncio.create_task(self._reasoning_engine.run_loop())
             logger.warning(f"{self.log_prefix} 已重新拉起 Maisaka 内部循环任务")
+
+    def _is_auto_chat_enabled(self) -> bool:
+        """判断当前是否启用自动聊天。"""
+
+        return bool(getattr(global_config.chat, "enable_auto_chat", False))
+
+    def _get_auto_chat_idle_seconds(self) -> float:
+        """获取自动聊天触发前需要保持空闲的秒数。"""
+
+        return max(60.0, float(getattr(global_config.chat, "auto_chat_idle_seconds", 1800) or 1800))
+
+    def _get_auto_chat_check_interval_seconds(self) -> float:
+        """获取自动聊天检查间隔。"""
+
+        return max(10.0, float(getattr(global_config.chat, "auto_chat_check_interval_seconds", 60) or 60))
+
+    def _ensure_auto_chat_task_running(self) -> None:
+        """在配置开启时确保自动聊天后台检查任务存在。"""
+
+        if not self._running or not self._is_auto_chat_enabled():
+            return
+        if self._auto_chat_task is not None and not self._auto_chat_task.done():
+            return
+        self._auto_chat_task = asyncio.create_task(self._auto_chat_loop())
+        logger.info(f"{self.log_prefix} 自动聊天检查任务已启动")
+
+    def _cancel_auto_chat_task(self) -> None:
+        """取消自动聊天后台检查任务。"""
+
+        if self._auto_chat_task is None:
+            return
+        self._auto_chat_task.cancel()
+        self._auto_chat_task = None
+
+    async def _auto_chat_loop(self) -> None:
+        """定期检查会话空闲状态，并在合适时投递主动聊天触发。"""
+
+        try:
+            while self._running and self._is_auto_chat_enabled():
+                await asyncio.sleep(self._get_auto_chat_check_interval_seconds())
+                if not self._should_trigger_auto_chat():
+                    continue
+                self._last_auto_chat_trigger_at = time.time()
+                self._message_turn_scheduled = True
+                await self._internal_turn_queue.put("proactive")
+                logger.info(f"{self.log_prefix} 已投递自动聊天触发")
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.error(f"{self.log_prefix} 自动聊天检查任务异常退出: {exc}", exc_info=True)
+        finally:
+            self._auto_chat_task = None
+
+    def _should_trigger_auto_chat(self) -> bool:
+        """判断是否应投递一次自动聊天触发。"""
+
+        if not self._running or not self._is_auto_chat_enabled():
+            return False
+        if self._agent_state != self._STATE_STOP:
+            return False
+        if self._message_turn_scheduled or self._has_pending_messages():
+            return False
+        if not self.message_cache:
+            return False
+
+        now = time.time()
+        latest_activity_at = max(
+            self._last_message_received_at,
+            self._last_auto_chat_activity_at,
+            self._last_auto_chat_trigger_at,
+        )
+        return now - latest_activity_at >= self._get_auto_chat_idle_seconds()
+
+    def build_auto_chat_reference_message(self) -> ReferenceMessage:
+        """构造自动聊天触发时注入给 Planner 的一次性参考消息。"""
+
+        configured_prompt = str(getattr(global_config.chat, "auto_chat_prompt", "") or "").strip()
+        if not configured_prompt:
+            configured_prompt = (
+                "当前聊天已经安静了一段时间。请判断是否适合自然地发起一个轻量话题、"
+                "只发一个表情包，或结束本轮不打扰。"
+            )
+        content = (
+            "[自动聊天触发]\n"
+            f"{configured_prompt}\n\n"
+            "可选动作：\n"
+            "- 如果适合文字开口，先简短思考，再调用 proactive_reply。\n"
+            "- 如果发一个表情包更像自然接话，可以调用 send_emoji。\n"
+            "- 如果需要结合过去共同经历或偏好，可以先调用 query_memory。\n"
+            "- 如果现在不适合打扰，调用 finish 或不继续发言。"
+        )
+        return ReferenceMessage(
+            content=content,
+            timestamp=datetime.now(),
+            reference_type=ReferenceMessageType.TOOL_HINT,
+            remaining_uses_value=1,
+            display_prefix="[自动聊天]",
+        )
+
+    def begin_auto_chat_turn(self) -> None:
+        """标记当前 Planner 回合来自自动聊天触发。"""
+
+        self._auto_chat_turn_active = True
+
+    def end_auto_chat_turn(self) -> None:
+        """结束自动聊天回合标记。"""
+
+        self._auto_chat_turn_active = False
+
+    def is_auto_chat_turn_active(self) -> bool:
+        """返回当前是否处于自动聊天触发回合。"""
+
+        return self._auto_chat_turn_active
+
+    def mark_auto_chat_visible_output(self) -> None:
+        """记录自动聊天已经产生了可见输出。"""
+
+        self._last_auto_chat_activity_at = time.time()
 
     def _register_tool_providers(self) -> None:
         """注册 Maisaka 运行时默认启用的工具 Provider。"""

@@ -34,7 +34,7 @@ from .context import BuiltinToolRuntimeContext
 logger = get_logger("maisaka_builtin_send_emoji")
 
 _EMOJI_SUB_AGENT_CONTEXT_LIMIT = 12
-_EMOJI_SUB_AGENT_MAX_TOKENS = 240
+_EMOJI_SUB_AGENT_MAX_TOKENS = 24000
 _EMOJI_MAX_CANDIDATE_COUNT = 64
 _EMOJI_CANDIDATE_TILE_SIZE = 256
 _EMOJI_SUCCESS_MESSAGE = "表情包发送成功"
@@ -472,6 +472,8 @@ async def handle_tool(
                 emoji_base64=send_result.emoji_base64,
                 success_message=_EMOJI_SUCCESS_MESSAGE,
             )
+        if tool_ctx.runtime.is_auto_chat_turn_active():
+            tool_ctx.runtime.mark_auto_chat_visible_output()
         structured_result["success"] = True
         return tool_ctx.build_success_result(
             invocation.tool_name,

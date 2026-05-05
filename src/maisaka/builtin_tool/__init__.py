@@ -22,6 +22,12 @@ from .query_memory import get_tool_spec as get_query_memory_tool_spec
 from .query_memory import handle_tool as handle_query_memory_tool
 from .query_person_info import get_tool_spec as get_query_person_info_tool_spec
 from .query_person_info import handle_tool as handle_query_person_info_tool
+from .proactive_reply import get_tool_spec as get_proactive_reply_tool_spec
+from .proactive_reply import handle_tool as handle_proactive_reply_tool
+from .mute_user import get_tool_spec as get_mute_user_tool_spec
+from .mute_user import handle_tool as handle_mute_user_tool
+from .internet_search import get_tool_spec as get_internet_search_tool_spec
+from .internet_search import handle_tool as handle_internet_search_tool
 from .reply import get_tool_spec as get_reply_tool_spec
 from .reply import handle_tool as handle_reply_tool
 from .send_emoji import get_tool_spec as get_send_emoji_tool_spec
@@ -75,6 +81,9 @@ BUILTIN_TOOL_ENTRIES: List[BuiltinToolEntry] = [
     BuiltinToolEntry("continue", get_continue_tool_spec, handle_continue_tool, stage="timing"),
     BuiltinToolEntry("finish", get_finish_tool_spec, handle_finish_tool, stage="action"),
     BuiltinToolEntry("reply", get_reply_tool_spec, handle_reply_tool, stage="action"),
+    BuiltinToolEntry("proactive_reply", get_proactive_reply_tool_spec, handle_proactive_reply_tool, stage="action"),
+    BuiltinToolEntry("mute_user", get_mute_user_tool_spec, handle_mute_user_tool, stage="action", chat_scope="group"),
+    BuiltinToolEntry("internet_search", get_internet_search_tool_spec, handle_internet_search_tool, stage="action"),
     BuiltinToolEntry(
         "view_complex_message",
         get_view_complex_message_tool_spec,
