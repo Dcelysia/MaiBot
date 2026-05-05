@@ -2,23 +2,28 @@
 配置管理API路由
 """
 
+from pathlib import Path
+from typing import Annotated, Any, Dict, List, Tuple, Union, get_args, get_origin
 import copy
 import os
-from pathlib import Path
-from typing import Annotated, Any, Dict, List, Tuple
+import types
 
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 import tomlkit
-from fastapi import APIRouter, Body, Depends, HTTPException
 
 from src.common.logger import get_logger
+from src.common.prompt_i18n import list_prompt_templates
 from src.config.config import CONFIG_DIR, PROJECT_ROOT, Config, ModelConfig
-from src.config.config_base import AttributeData
+from src.config.config_base import AttributeData, ConfigBase
 from src.config.model_configs import (
     APIProvider,
     ModelInfo,
     ModelTaskConfig,
 )
 from src.config.official_configs import (
+    AMemorixConfig,
     BotConfig,
     ChatConfig,
     ChineseTypoConfig,
@@ -46,8 +51,78 @@ ConfigBody = Annotated[Dict[str, Any], Body()]
 SectionBody = Annotated[Any, Body()]
 RawContentBody = Annotated[str, Body(embed=True)]
 PathBody = Annotated[Dict[str, str], Body()]
+PromptContentBody = Annotated[str, Body(embed=True)]
 
 router = APIRouter(prefix="/config", tags=["config"], dependencies=[Depends(require_auth)])
+
+PROMPTS_DIR = PROJECT_ROOT / "prompts"
+MAISAKA_PROMPT_PREVIEW_DIR = (PROJECT_ROOT / "logs" / "maisaka_prompt").resolve()
+
+
+class PromptFileInfo(BaseModel):
+    """Prompt 文件信息。"""
+
+    name: str = Field(..., description="Prompt 文件名")
+    size: int = Field(..., description="文件大小")
+    modified_at: float = Field(..., description="最后修改时间戳")
+    display_name: str = Field(default="", description="Prompt 展示名称")
+    advanced: bool = Field(default=False, description="是否为高级 Prompt")
+    description: str = Field(default="", description="Prompt 描述")
+
+
+class PromptCatalogResponse(BaseModel):
+    """Prompt 目录响应。"""
+
+    success: bool = True
+    languages: List[str]
+    files: Dict[str, List[PromptFileInfo]]
+
+
+class PromptFileResponse(BaseModel):
+    """Prompt 文件内容响应。"""
+
+    success: bool = True
+    language: str
+    filename: str
+    content: str
+
+
+def _safe_prompt_path(language: str, filename: str) -> Path:
+    """校验并解析 prompts 下的文件路径。"""
+
+    normalized_language = language.strip()
+    normalized_filename = filename.strip()
+
+    if not normalized_language or any(part in normalized_language for part in ("..", "/", "\\")):
+        raise HTTPException(status_code=400, detail="无效的 Prompt 语言目录")
+    if not normalized_filename.endswith(".prompt") or any(part in normalized_filename for part in ("..", "/", "\\")):
+        raise HTTPException(status_code=400, detail="无效的 Prompt 文件名")
+
+    prompt_path = (PROMPTS_DIR / normalized_language / normalized_filename).resolve()
+    prompts_root = PROMPTS_DIR.resolve()
+    try:
+        prompt_path.relative_to(prompts_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Prompt 路径越界") from exc
+    return prompt_path
+
+
+def _safe_maisaka_prompt_preview_path(relative_path: str) -> Path:
+    """校验并解析 MaiSaka Prompt HTML 预览路径。"""
+
+    normalized_path = relative_path.strip().replace("\\", "/")
+    if not normalized_path or normalized_path.startswith("/") or ".." in Path(normalized_path).parts:
+        raise HTTPException(status_code=400, detail="无效的 Prompt 预览路径")
+
+    preview_path = (MAISAKA_PROMPT_PREVIEW_DIR / normalized_path).resolve()
+    try:
+        preview_path.relative_to(MAISAKA_PROMPT_PREVIEW_DIR)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Prompt 预览路径越界") from exc
+
+    if preview_path.suffix.lower() != ".html":
+        raise HTTPException(status_code=400, detail="只允许打开 HTML Prompt 预览")
+    return preview_path
 
 
 def _toml_to_plain_dict(obj: Any) -> Any:
@@ -59,7 +134,159 @@ def _toml_to_plain_dict(obj: Any) -> Any:
     return obj
 
 
+def _coerce_numeric_value(value: Any, target_type: Any) -> Any:
+    """根据配置字段类型，把旧 WebUI 可能写入的数字字符串还原为数字。"""
+    if target_type is str:
+        if isinstance(value, (int, float)):
+            return str(value)
+        return value
+
+    if target_type is int:
+        if isinstance(value, str):
+            try:
+                parsed_value = float(value.strip())
+            except ValueError:
+                return value
+            if parsed_value.is_integer():
+                return int(parsed_value)
+        return value
+
+    if target_type is float:
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError:
+                return value
+        return value
+
+    return value
+
+
+def _coerce_value_by_annotation(value: Any, annotation: Any) -> Any:
+    """递归按 ConfigBase 字段注解修正数据类型，避免保存时把数字写成字符串。"""
+    value = _coerce_numeric_value(value, annotation)
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+
+    if origin in {Union, types.UnionType}:
+        for candidate_type in args:
+            if candidate_type is type(None):
+                continue
+            coerced_value = _coerce_value_by_annotation(value, candidate_type)
+            if coerced_value != value or type(coerced_value) is not type(value):
+                return coerced_value
+        return value
+
+    if origin in {list, List} and isinstance(value, list) and args:
+        item_type = args[0]
+        return [_coerce_value_by_annotation(item, item_type) for item in value]
+
+    if origin in {dict, Dict} and isinstance(value, dict) and len(args) >= 2:
+        value_type = args[1]
+        return {key: _coerce_value_by_annotation(item, value_type) for key, item in value.items()}
+
+    if isinstance(value, dict) and isinstance(annotation, type) and issubclass(annotation, ConfigBase):
+        return _coerce_config_numeric_values(value, annotation)
+
+    return value
+
+
+def _coerce_config_numeric_values(data: Dict[str, Any], config_type: type[ConfigBase]) -> Dict[str, Any]:
+    """按配置类 schema 统一修正所有数字字段类型。"""
+    for field_name, field_info in config_type.model_fields.items():
+        if field_name in data:
+            data[field_name] = _coerce_value_by_annotation(data[field_name], field_info.annotation)
+    return data
+
+
 # ===== 架构获取接口 =====
+
+
+@router.get("/prompts", response_model=PromptCatalogResponse)
+async def list_prompt_files():
+    """列出 prompts 目录下的语言和 Prompt 文件。"""
+
+    try:
+        if not PROMPTS_DIR.exists():
+            return PromptCatalogResponse(languages=[], files={})
+
+        languages: List[str] = []
+        files: Dict[str, List[PromptFileInfo]] = {}
+        for language_dir in sorted(PROMPTS_DIR.iterdir(), key=lambda item: item.name):
+            if not language_dir.is_dir():
+                continue
+
+            language = language_dir.name
+            prompt_template_infos = list_prompt_templates(locale=language, prompts_root=PROMPTS_DIR)
+            prompt_files: List[PromptFileInfo] = []
+            for prompt_file in sorted(language_dir.glob("*.prompt"), key=lambda item: item.name):
+                stat = prompt_file.stat()
+                template_info = prompt_template_infos.get(prompt_file.stem)
+                metadata = template_info.metadata if template_info and template_info.path == prompt_file else None
+                prompt_files.append(
+                    PromptFileInfo(
+                        name=prompt_file.name,
+                        size=stat.st_size,
+                        modified_at=stat.st_mtime,
+                        display_name=metadata.display_name if metadata else "",
+                        advanced=metadata.advanced if metadata else False,
+                        description=metadata.description if metadata else "",
+                    )
+                )
+
+            languages.append(language)
+            files[language] = prompt_files
+
+        return PromptCatalogResponse(languages=languages, files=files)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"列出 Prompt 文件失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"列出 Prompt 文件失败: {str(e)}") from e
+
+
+@router.get("/prompts/{language}/{filename}", response_model=PromptFileResponse)
+async def get_prompt_file(language: str, filename: str):
+    """读取指定语言下的 Prompt 文件内容。"""
+
+    prompt_path = _safe_prompt_path(language, filename)
+    if not prompt_path.exists() or not prompt_path.is_file():
+        raise HTTPException(status_code=404, detail="Prompt 文件不存在")
+
+    try:
+        content = prompt_path.read_text(encoding="utf-8")
+        return PromptFileResponse(language=language, filename=filename, content=content)
+    except Exception as e:
+        logger.error(f"读取 Prompt 文件失败: {prompt_path} {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"读取 Prompt 文件失败: {str(e)}") from e
+
+
+@router.put("/prompts/{language}/{filename}", response_model=PromptFileResponse)
+async def update_prompt_file(language: str, filename: str, content: PromptContentBody):
+    """更新指定语言下的 Prompt 文件内容。"""
+
+    prompt_path = _safe_prompt_path(language, filename)
+    if not prompt_path.parent.exists() or not prompt_path.parent.is_dir():
+        raise HTTPException(status_code=404, detail="Prompt 语言目录不存在")
+    if not prompt_path.exists() or not prompt_path.is_file():
+        raise HTTPException(status_code=404, detail="Prompt 文件不存在")
+
+    try:
+        prompt_path.write_text(content, encoding="utf-8", newline="\n")
+        return PromptFileResponse(language=language, filename=filename, content=content)
+    except Exception as e:
+        logger.error(f"保存 Prompt 文件失败: {prompt_path} {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"保存 Prompt 文件失败: {str(e)}") from e
+
+
+@router.get("/maisaka-prompt-preview", response_class=FileResponse)
+async def get_maisaka_prompt_preview(path: str = Query(..., description="logs/maisaka_prompt 下的相对 HTML 路径")):
+    """打开 MaiSaka 监控中生成的 Prompt HTML 预览。"""
+
+    preview_path = _safe_maisaka_prompt_preview_path(path)
+    if not preview_path.exists() or not preview_path.is_file():
+        raise HTTPException(status_code=404, detail="Prompt 预览文件不存在")
+    return FileResponse(preview_path, media_type="text/html")
 
 
 @router.get("/schema/bot")
@@ -128,6 +355,7 @@ async def get_config_section_schema(section_name: str):
         "telemetry": TelemetryConfig,
         "maim_message": MaimMessageConfig,
         "memory": MemoryConfig,
+        "a_memorix": AMemorixConfig,
         "debug": DebugConfig,
         "voice": VoiceConfig,
         "model_task_config": ModelTaskConfig,
@@ -195,6 +423,8 @@ async def get_model_config():
 async def update_bot_config(config_data: ConfigBody):
     """更新麦麦主程序配置"""
     try:
+        config_data = _coerce_config_numeric_values(config_data, Config)
+
         # 验证配置数据
         try:
             Config.from_dict(AttributeData(), copy.deepcopy(config_data))
@@ -218,6 +448,8 @@ async def update_bot_config(config_data: ConfigBody):
 async def update_model_config(config_data: ConfigBody):
     """更新模型配置"""
     try:
+        config_data = _coerce_config_numeric_values(config_data, ModelConfig)
+
         # 验证配置数据
         try:
             ModelConfig.from_dict(AttributeData(), copy.deepcopy(config_data))
@@ -270,9 +502,12 @@ async def update_bot_config_section(section_name: str, section_data: SectionBody
 
         # 验证完整配置
         try:
-            Config.from_dict(AttributeData(), _toml_to_plain_dict(config_data))
+            plain_config_data = _coerce_config_numeric_values(_toml_to_plain_dict(config_data), Config)
+            Config.from_dict(AttributeData(), copy.deepcopy(plain_config_data))
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"配置数据验证失败: {str(e)}") from e
+
+        config_data = plain_config_data
 
         # 保存配置（格式化数组为多行，保留注释）
         save_toml_with_format(config_data, config_path)
@@ -368,13 +603,14 @@ async def update_model_config_section(section_name: str, section_data: SectionBo
 
         # 验证完整配置
         try:
-            ModelConfig.from_dict(AttributeData(), _toml_to_plain_dict(config_data))
+            plain_config_data = _coerce_config_numeric_values(_toml_to_plain_dict(config_data), ModelConfig)
+            ModelConfig.from_dict(AttributeData(), copy.deepcopy(plain_config_data))
         except Exception as e:
             logger.error(f"配置数据验证失败，详细错误: {str(e)}")
             # 特殊处理：如果是更新 api_providers，检查是否有模型引用了已删除的provider
             if section_name == "api_providers" and "api_provider" in str(e):
                 provider_names = {p.get("name") for p in section_data if isinstance(p, dict)}
-                models = config_data.get("models", [])
+                models = plain_config_data.get("models", [])
                 orphaned_models: List[str] = [
                     str(model_name)
                     for m in models
@@ -386,6 +622,8 @@ async def update_model_config_section(section_name: str, section_data: SectionBo
                     error_msg = f"以下模型引用了已删除的提供商: {', '.join(orphaned_models)}。请先在模型管理页面删除这些模型，或重新分配它们的提供商。"
                     raise HTTPException(status_code=400, detail=error_msg) from e
             raise HTTPException(status_code=400, detail=f"配置数据验证失败: {str(e)}") from e
+
+        config_data = plain_config_data
 
         # 保存配置（格式化数组为多行，保留注释）
         save_toml_with_format(config_data, config_path)

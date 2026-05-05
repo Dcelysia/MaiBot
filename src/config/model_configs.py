@@ -172,7 +172,7 @@ class APIProvider(ConfigBase):
     """工具参数解析模式。可选值：`auto`、`strict`、`repair`、`double_decode`。"""
 
     max_retry: int = Field(
-        default=2,
+        default=3,
         ge=0,
         json_schema_extra={
             "x-widget": "input",
@@ -182,7 +182,7 @@ class APIProvider(ConfigBase):
     """最大重试次数 (单个模型API调用失败, 最多重试的次数)"""
 
     timeout: int = Field(
-        default=10,
+        default=60,
         ge=1,
         json_schema_extra={
             "x-widget": "input",
@@ -193,7 +193,7 @@ class APIProvider(ConfigBase):
     """API调用的超时时长 (超过这个时长, 本次请求将被视为"请求超时", 单位: 秒)"""
 
     retry_interval: int = Field(
-        default=10,
+        default=5,
         ge=1,
         json_schema_extra={
             "x-widget": "input",
@@ -343,9 +343,15 @@ class ModelInfo(ConfigBase):
             "x-icon": "sliders",
         },
     )
-    """额外参数 (用于API调用时的额外配置)"""
+    """额外参数 (用于API调用时的额外配置)。
+    OpenAI 兼容客户端会将该字典拆分为请求附加项：headers 会作为请求头传入，query 会作为 URL 查询参数传入，body 会合并到请求体。
+    未放入 headers/query/body 的普通键，也会作为请求体额外字段传入；例如 {enable_thinking = "false"} 会传为请求体字段 enable_thinking。
+    该字段不会以 extra_params 这个键整体发送给模型服务商。
+    temperature 和 max_tokens 也可写在此处作为模型级默认值，但更推荐使用同名独立配置项。
+    Gemini 客户端会按自身支持的字段筛选并映射到 GenerateContentConfig、EmbedContentConfig 或音频请求配置中。"""
 
     def model_post_init(self, context: Any = None):
+        self.model_identifier = self.model_identifier.strip()
         if not self.model_identifier:
             raise ValueError(t("config.model_identifier_empty_generic"))
         if not self.name:
@@ -397,6 +403,7 @@ class TaskConfig(ConfigBase):
             "x-widget": "input",
             "x-icon": "alert-circle",
             "step": 0.1,
+            "advanced": True,
         },
     )
     """慢请求阈值（秒），超过此值会输出警告日志"""
@@ -415,6 +422,24 @@ class TaskConfig(ConfigBase):
 class ModelTaskConfig(ConfigBase):
     """模型配置类"""
 
+    replyer: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+            "x-icon": "message-square",
+        },
+    )
+    """回复模型配置"""
+
+    planner: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+            "x-icon": "map",
+        },
+    )
+    """规划模型配置"""
+
     utils: TaskConfig = Field(
         default_factory=TaskConfig,
         json_schema_extra={
@@ -424,23 +449,15 @@ class ModelTaskConfig(ConfigBase):
     )
     """组件使用的模型, 例如表情包模块, 取名模块, 关系模块, 麦麦的情绪变化等，是麦麦必须的模型"""
 
-    replyer: TaskConfig = Field(
+    learner: TaskConfig = Field(
         default_factory=TaskConfig,
         json_schema_extra={
             "x-widget": "custom",
-            "x-icon": "message-square",
+            "x-icon": "graduation-cap",
+            "advanced": True,
         },
     )
-    """首要回复模型配置, 还用于表达器和表达方式学习"""
-    
-    planner: TaskConfig = Field(
-        default_factory=TaskConfig,
-        json_schema_extra={
-            "x-widget": "custom",
-            "x-icon": "map",
-        },
-    )
-    """规划模型配置"""
+    """学习模型配置，用于表达方式学习和黑话学习；留空时自动继用 utils 模型"""
 
     vlm: TaskConfig = Field(
         default_factory=TaskConfig,
@@ -456,6 +473,7 @@ class ModelTaskConfig(ConfigBase):
         json_schema_extra={
             "x-widget": "custom",
             "x-icon": "volume-2",
+            "advanced": True,
         },
     )
     """语音识别模型配置"""

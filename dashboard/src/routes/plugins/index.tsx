@@ -214,6 +214,7 @@ function PluginsPageContent() {
             for (const installedPlugin of installed) {
               const existsInMarket = mergedData.some(p => p.id === installedPlugin.id)
               if (!existsInMarket && installedPlugin.manifest) {
+                const urls = installedPlugin.manifest.urls as PluginInfo['manifest']['urls'] | undefined
                 // 添加本地插件到列表
                 mergedData.push({
                   id: installedPlugin.id,
@@ -225,8 +226,9 @@ function PluginsPageContent() {
                     author: installedPlugin.manifest.author,
                     license: installedPlugin.manifest.license || 'Unknown',
                     host_application: installedPlugin.manifest.host_application,
-                    homepage_url: installedPlugin.manifest.homepage_url,
-                    repository_url: installedPlugin.manifest.repository_url,
+                    homepage_url: installedPlugin.manifest.homepage_url || urls?.homepage,
+                    repository_url: installedPlugin.manifest.repository_url || urls?.repository,
+                    urls,
                     keywords: installedPlugin.manifest.keywords || [],
                     categories: installedPlugin.manifest.categories || [],
                     default_locale: (installedPlugin.manifest.default_locale as string) || 'zh-CN',
@@ -237,6 +239,7 @@ function PluginsPageContent() {
                   review_count: 0,
                   installed: true,
                   installed_version: installedPlugin.manifest.version,
+                  source: 'local',
                   published_at: new Date().toISOString(),
                   updated_at: new Date().toISOString(),
                 })
@@ -430,7 +433,7 @@ function PluginsPageContent() {
       
       const installResult = await installPlugin(
         installingPlugin.id,
-        installingPlugin.manifest.repository_url || '',
+        installingPlugin.manifest.repository_url || installingPlugin.manifest.urls?.repository || '',
         branch
       )
       
@@ -574,7 +577,7 @@ function PluginsPageContent() {
     try {
       const updateResult = await updatePlugin(
         plugin.id,
-        plugin.manifest.repository_url || '',
+        plugin.manifest.repository_url || plugin.manifest.urls?.repository || '',
         'main'
       )
       
@@ -634,6 +637,7 @@ function PluginsPageContent() {
   const getFilteredPluginCount = (tab: 'all' | 'installed' | 'updates') => {
     return plugins.filter(p => {
       if (!p.manifest) return false
+      if (tab === 'all' && p.source === 'local') return false
       const matchesSearch = searchQuery === '' ||
         p.manifest.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
         p.manifest.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||

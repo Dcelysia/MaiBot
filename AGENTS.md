@@ -32,8 +32,7 @@
 
 # 运行/调试/构建/测试/依赖
 优先使用uv
-依赖项以 pyproject.toml 为准
-
+依赖项以 pyproject.toml 为准，要同步更新requirements.txt
 
 # 语言规范
 项目的首选语言为简体中文，无论是注释语言，日志展示语言，还是 WebUI 展示语言都首要以简体中文为首要实现目标
@@ -41,11 +40,12 @@
 # 配置文件修改
 如果你需要改动配置文件，不需要修改实际的bot_config.toml或者model_config.toml，只需要修改配置文件模版，并新增一个版本号即可，也不必要为配置改动创建测试文件。
 
-# 关于webui修改
-不要修改dashboard下的内容，因为这部分内容由另一个仓库build
 
 # 关于 A_memorix 修改
 如果修改涉及 `src/A_memorix`，请先阅读 `src/A_memorix/MODIFICATION_POLICY.md`。
+
+# prompt模板、
+涉及对prompt模板的修改，要同步修改英文和日文的文件，对齐到中文
 
 默认原则：
 1. `src/A_memorix` 的实现层改动应优先遵守 `src/A_memorix/MODIFICATION_POLICY.md` 中的归属约束。
@@ -54,3 +54,6 @@
 
 # maibot插件开发文档
 https://github.com/Mai-with-u/maibot-plugin-sdk/blob/main/docs/guide.md
+
+# 如何提交maibot插件
+https://github.com/Mai-with-u/plugin-repo/blob/main/CONTRIBUTING.md

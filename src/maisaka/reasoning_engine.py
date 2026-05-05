@@ -140,7 +140,6 @@ class MaisakaReasoningEngine:
             system_prompt=system_prompt,
             request_kind="timing_gate",
             interrupt_flag=None,
-            max_tokens=TIMING_GATE_MAX_TOKENS,
             tool_definitions=tool_definitions,
         )
 
@@ -727,6 +726,7 @@ class MaisakaReasoningEngine:
                                 ),
                                 planner_total_tokens=response.total_tokens if response is not None else None,
                                 planner_duration_ms=planner_duration_ms if response is not None else None,
+                                planner_prompt_html_uri=response.prompt_html_uri if response is not None else None,
                                 tools=tool_monitor_results,
                                 time_records=dict(completed_cycle.time_records),
                                 agent_state=self._runtime._agent_state,
