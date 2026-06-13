@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 
 import { useToast } from '@/hooks/use-toast'
 import { chatWsClient } from '@/lib/chat-ws-client'
-import { fetchWithAuth } from '@/lib/fetch-with-auth'
+import { ApiError, backendApi } from '@/lib/http'
 
 import { ChatComposer } from './ChatComposer'
 import { ChatHeaderBar } from './ChatHeaderBar'
@@ -11,8 +11,11 @@ import { ChatTabBar } from './ChatTabBar'
 import { ChatWorkspaceSidebar } from './ChatWorkspaceSidebar'
 import { MessageList } from './MessageList'
 import type {
+  ChatImageAttachment,
+  ChatIncomingImage,
   ChatTab,
   ChatMessage,
+  MessageSegment,
   PersonInfo,
   PlatformInfo,
   SavedVirtualTab,
@@ -27,6 +30,62 @@ import {
   saveVirtualTabs,
 } from './utils'
 import { VirtualIdentityDialog } from './VirtualIdentityDialog'
+
+const MAX_CHAT_IMAGES = 8
+
+function buildImageDataUrl(image: ChatImageAttachment | ChatIncomingImage): string {
+  const dataUrl = image.data_url || ('dataUrl' in image ? image.dataUrl : undefined)
+  if (dataUrl) {
+    return dataUrl
+  }
+
+  const mimeType =
+    image.mime_type || ('mimeType' in image ? image.mimeType : undefined) || 'image/png'
+  return image.base64 ? `data:${mimeType};base64,${image.base64}` : ''
+}
+
+function buildMessageSegments(
+  content: string,
+  images: Array<ChatImageAttachment | ChatIncomingImage>
+): MessageSegment[] {
+  const segments: MessageSegment[] = []
+  if (content) {
+    segments.push({ type: 'text', data: content })
+  }
+
+  for (const image of images) {
+    const dataUrl = buildImageDataUrl(image)
+    if (dataUrl) {
+      segments.push({ type: 'image', data: dataUrl })
+    }
+  }
+
+  return segments
+}
+
+function readImageFile(file: File, id: string): Promise<ChatImageAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error(`Failed to read image: ${file.name}`))
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === 'string' ? reader.result : ''
+      const base64 = dataUrl.includes(',') ? dataUrl.split(',', 2)[1] : ''
+      if (!base64 || !dataUrl.startsWith('data:image/')) {
+        reject(new Error(`Invalid image data: ${file.name}`))
+        return
+      }
+
+      resolve({
+        id,
+        name: file.name,
+        mime_type: file.type || 'image/png',
+        base64,
+        data_url: dataUrl,
+      })
+    }
+    reader.readAsDataURL(file)
+  })
+}
 
 export function ChatPage() {
   const { t, i18n } = useTranslation()
@@ -74,6 +133,7 @@ export function ChatPage() {
 
   // 通用状态
   const [inputValue, setInputValue] = useState('')
+  const [selectedImages, setSelectedImages] = useState<ChatImageAttachment[]>([])
   const [isConnecting, setIsConnecting] = useState(false)
   const [isLoadingHistory, setIsLoadingHistory] = useState(true)
   const [userName, setUserName] = useState(getStoredUserName())
@@ -129,38 +189,33 @@ export function ChatPage() {
   const fetchPlatforms = useCallback(async () => {
     setIsLoadingPlatforms(true)
     try {
-      const response = await fetchWithAuth('/api/chat/platforms')
-      console.log('[Chat] 平台列表响应:', response.status, response.headers.get('content-type'))
-      if (response.ok) {
-        const contentType = response.headers.get('content-type')
-        if (contentType && contentType.includes('application/json')) {
-          const data = await response.json()
-          console.log('[Chat] 平台列表数据:', data)
-          setPlatforms(data.platforms || [])
-        } else {
-          const text = await response.text()
-          console.error('[Chat] 获取平台列表失败: 非 JSON 响应:', text.substring(0, 200))
-          toast({
-            title: t('chat.toast.connectionFailed'),
-            description: t('chat.toast.backendUnavailable'),
-            variant: 'destructive',
-          })
-        }
-      } else {
-        console.error('[Chat] 获取平台列表失败: HTTP', response.status)
+      const data = await backendApi.get<{ platforms?: PlatformInfo[] }>('/api/chat/platforms')
+      setPlatforms(data.platforms || [])
+    } catch (e) {
+      if (e instanceof ApiError && e.status !== undefined && (e.status < 200 || e.status >= 300)) {
+        // HTTP 层失败
+        console.error('[Chat] 获取平台列表失败: HTTP', e.status)
         toast({
           title: t('chat.toast.platformFailed'),
-          description: t('chat.toast.serverError', { status: response.status }),
+          description: t('chat.toast.serverError', { status: e.status }),
+          variant: 'destructive',
+        })
+      } else if (e instanceof ApiError && e.status !== undefined) {
+        // HTTP 成功但响应不是合法 JSON（后端不可用，命中了前端页面等）
+        console.error('[Chat] 获取平台列表失败: 非 JSON 响应:', e.message)
+        toast({
+          title: t('chat.toast.connectionFailed'),
+          description: t('chat.toast.backendUnavailable'),
+          variant: 'destructive',
+        })
+      } else {
+        console.error('[Chat] 获取平台列表失败:', e)
+        toast({
+          title: t('chat.toast.networkError'),
+          description: t('chat.toast.backendUnavailableShort'),
           variant: 'destructive',
         })
       }
-    } catch (e) {
-      console.error('[Chat] 获取平台列表失败:', e)
-      toast({
-        title: t('chat.toast.networkError'),
-        description: t('chat.toast.backendUnavailableShort'),
-        variant: 'destructive',
-      })
     } finally {
       setIsLoadingPlatforms(false)
     }
@@ -170,21 +225,14 @@ export function ChatPage() {
   const fetchPersons = useCallback(async (platform: string, search?: string) => {
     setIsLoadingPersons(true)
     try {
-      const params = new URLSearchParams()
-      if (platform) params.append('platform', platform)
-      if (search) params.append('search', search)
-      params.append('limit', '50')
-
-      const response = await fetchWithAuth(`/api/chat/persons?${params.toString()}`)
-      if (response.ok) {
-        const contentType = response.headers.get('content-type')
-        if (contentType && contentType.includes('application/json')) {
-          const data = await response.json()
-          setPersons(data.persons || [])
-        } else {
-          console.error('[Chat] 获取用户列表失败: 后端返回非 JSON 响应')
-        }
-      }
+      const data = await backendApi.get<{ persons?: PersonInfo[] }>('/api/chat/persons', {
+        query: {
+          platform: platform || undefined,
+          search: search || undefined,
+          limit: 50,
+        },
+      })
+      setPersons(data.persons || [])
     } catch (e) {
       console.error('[Chat] 获取用户列表失败:', e)
     } finally {
@@ -255,6 +303,11 @@ export function ChatPage() {
             id: data.message_id || generateMessageId('user'),
             type: 'user',
             content: data.content || '',
+            message_type: data.images && data.images.length > 0 ? 'rich' : 'text',
+            segments:
+              data.images && data.images.length > 0
+                ? buildMessageSegments(data.content || '', data.images)
+                : undefined,
             timestamp: data.timestamp || Date.now() / 1000,
             sender: data.sender,
           })
@@ -334,7 +387,8 @@ export function ChatPage() {
             const msgId = msg.id || generateMessageId(isBot ? 'bot' : 'user')
             const contentHash = `${isBot ? 'bot' : 'user'}-${msg.content}-${Math.floor(msg.timestamp * 1000)}`
             processedSet.add(contentHash)
-            const isRich = msg.message_type === 'rich' && Array.isArray(msg.segments) && msg.segments.length > 0
+            const isRich =
+              msg.message_type === 'rich' && Array.isArray(msg.segments) && msg.segments.length > 0
             return {
               id: msgId,
               type: isBot ? 'bot' : ('user' as const),
@@ -468,7 +522,7 @@ export function ChatPage() {
 
   // 发送消息到当前活动标签页
   const sendMessage = useCallback(async () => {
-    if (!inputValue.trim() || !activeTab?.isConnected) {
+    if ((!inputValue.trim() && selectedImages.length === 0) || !activeTab?.isConnected) {
       return
     }
 
@@ -476,11 +530,12 @@ export function ChatPage() {
       activeTab?.type === 'virtual' ? activeTab.virtualConfig?.userName || userName : userName
 
     const messageContent = inputValue.trim()
+    const imagesToSend = selectedImages
     const currentTimestamp = Date.now() / 1000
 
     // 添加到去重缓存，防止服务器广播回来的消息重复显示
     const processedSet = processedMessagesMapRef.current.get(activeTabId) || new Set()
-    const contentHash = `user-${messageContent}-${Math.floor(currentTimestamp * 1000)}`
+    const contentHash = `user-${messageContent}-${imagesToSend.length}-${Math.floor(currentTimestamp * 1000)}`
     processedSet.add(contentHash)
     processedMessagesMapRef.current.set(activeTabId, processedSet)
 
@@ -494,6 +549,9 @@ export function ChatPage() {
       id: generateMessageId('user'),
       type: 'user',
       content: messageContent,
+      message_type: imagesToSend.length > 0 ? 'rich' : 'text',
+      segments:
+        imagesToSend.length > 0 ? buildMessageSegments(messageContent, imagesToSend) : undefined,
       timestamp: currentTimestamp,
       sender: {
         name: displayName,
@@ -503,9 +561,16 @@ export function ChatPage() {
     addMessageToTab(activeTabId, userMessage)
 
     setInputValue('')
+    setSelectedImages([])
 
     try {
-      await chatWsClient.sendMessage(activeTabId, messageContent, displayName)
+      await chatWsClient.sendMessage(activeTabId, messageContent, displayName, {
+        images: imagesToSend.map((image) => ({
+          name: image.name,
+          mime_type: image.mime_type,
+          base64: image.base64,
+        })),
+      })
     } catch (error) {
       console.error('发送聊天消息失败:', error)
       setTabs((prev) =>
@@ -523,10 +588,61 @@ export function ChatPage() {
         variant: 'destructive',
       })
     }
-  }, [activeTab, activeTabId, addMessageToTab, inputValue, t, toast, userName])
+  }, [activeTab, activeTabId, addMessageToTab, inputValue, selectedImages, t, toast, userName])
 
   // 处理键盘事件
   // 处理昵称变更（来自侧边栏）
+  const handleAddImages = useCallback(
+    async (files: FileList) => {
+      const imageFiles = Array.from(files).filter((file) => file.type.startsWith('image/'))
+      if (imageFiles.length === 0) {
+        toast({
+          title: t('chat.toast.imageUnsupported'),
+          description: t('chat.toast.imageUnsupportedDesc'),
+          variant: 'destructive',
+        })
+        return
+      }
+
+      const remainingSlots = MAX_CHAT_IMAGES - selectedImages.length
+      if (remainingSlots <= 0) {
+        toast({
+          title: t('chat.toast.imageLimit'),
+          description: t('chat.toast.imageLimitDesc', { count: MAX_CHAT_IMAGES }),
+          variant: 'destructive',
+        })
+        return
+      }
+
+      const filesToRead = imageFiles.slice(0, remainingSlots)
+      if (imageFiles.length > remainingSlots) {
+        toast({
+          title: t('chat.toast.imageLimit'),
+          description: t('chat.toast.imageLimitDesc', { count: MAX_CHAT_IMAGES }),
+        })
+      }
+
+      try {
+        const attachments = await Promise.all(
+          filesToRead.map((file) => readImageFile(file, generateMessageId('img')))
+        )
+        setSelectedImages((prev) => [...prev, ...attachments])
+      } catch (error) {
+        console.error('读取聊天图片失败', error)
+        toast({
+          title: t('chat.toast.imageReadFailed'),
+          description: t('chat.toast.imageReadFailedDesc'),
+          variant: 'destructive',
+        })
+      }
+    },
+    [selectedImages.length, t, toast]
+  )
+
+  const handleRemoveImage = useCallback((id: string) => {
+    setSelectedImages((prev) => prev.filter((image) => image.id !== id))
+  }, [])
+
   const handleUpdateUserName = useCallback(
     (newName: string) => {
       const trimmed = newName.trim() || t('chat.userNameFallback')
@@ -746,8 +862,11 @@ export function ChatPage() {
         <ChatComposer
           value={inputValue}
           onChange={setInputValue}
+          onAddImages={handleAddImages}
+          onRemoveImage={handleRemoveImage}
           onSend={() => void sendMessage()}
-          disabled={!activeTab?.isConnected || !inputValue.trim()}
+          disabled={!activeTab?.isConnected}
+          images={selectedImages}
           isConnected={!!activeTab?.isConnected}
         />
       </div>

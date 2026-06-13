@@ -13,12 +13,15 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, T
 import asyncio
 
 from src.common.logger import get_logger
+from src.common.shutdown import is_shutdown_requested
+from src.plugin_runtime.protocol.errors import ErrorCode, RPCError
 
-from .message_utils import PluginMessageUtils, MessageDict
+from .circuit_breaker import get_plugin_circuit_breaker
 
 if TYPE_CHECKING:
-    from .supervisor import PluginRunnerSupervisor
     from .component_registry import ComponentRegistry, EventHandlerEntry
+    from .message_utils import MessageDict
+    from .supervisor import PluginRunnerSupervisor
     from src.chat.message_receive.message import SessionMessage
 
 logger = get_logger("plugin_runtime.host.event_dispatcher")
@@ -36,7 +39,7 @@ class EventResult:
     handler_name: str
     success: bool = field(default=True)
     continue_processing: bool = field(default=True)
-    modified_message: Optional[MessageDict] = field(default=None)
+    modified_message: Optional["MessageDict"] = field(default=None)
     custom_result: Any = field(default=None)
 
 
@@ -97,14 +100,21 @@ class EventDispatcher:
         Returns:
             (should_continue, modified_message_dict) (bool, SessionMessage | None): (是否继续后续执行, 可选的修改后的消息)
         """
+        if is_shutdown_requested():
+            return True, None
+
         handler_entries = self._component_registry.get_event_handlers(event_type)
         if not handler_entries:
             return True, None
 
         should_continue = True
-        modified_message: Optional[MessageDict] = (
-            PluginMessageUtils._session_message_to_dict(message) if message else None
-        )
+        plugin_message_utils: Any | None = None
+        modified_message: Optional["MessageDict"] = None
+        if message is not None:
+            from .message_utils import PluginMessageUtils
+
+            plugin_message_utils = PluginMessageUtils
+            modified_message = plugin_message_utils._session_message_to_dict(message)
         intercept_handlers: List["EventHandlerEntry"] = []
         non_blocking_handlers: List["EventHandlerEntry"] = []
 
@@ -115,6 +125,9 @@ class EventDispatcher:
                 non_blocking_handlers.append(entry)
 
         for entry in intercept_handlers:
+            if is_shutdown_requested():
+                return should_continue, None
+
             args = {
                 "event_type": event_type,
                 "message": modified_message,
@@ -130,6 +143,9 @@ class EventDispatcher:
         if should_continue:
             final_message = modified_message
             for entry in non_blocking_handlers:
+                if is_shutdown_requested():
+                    break
+
                 async_message = final_message.copy() if final_message else final_message
                 args = {
                     "event_type": event_type,
@@ -141,9 +157,14 @@ class EventDispatcher:
                 self._background_tasks.add(task)
                 task.add_done_callback(self._background_tasks.discard)
         try:
-            modified_message_obj = (
-                PluginMessageUtils._build_session_message_from_dict(modified_message) if modified_message else None  # type: ignore
-            )
+            if modified_message:
+                if plugin_message_utils is None:
+                    from .message_utils import PluginMessageUtils
+
+                    plugin_message_utils = PluginMessageUtils
+                modified_message_obj = plugin_message_utils._build_session_message_from_dict(modified_message)
+            else:
+                modified_message_obj = None
         except Exception as e:
             logger.error(f"构建修改后的 SessionMessage 失败: {e}")
             modified_message_obj = None
@@ -157,10 +178,22 @@ class EventDispatcher:
         event_type: str,
     ) -> Optional[EventResult]:
         """调用单个 handler 并收集结果。"""
+        if is_shutdown_requested():
+            return EventResult(handler_name=handler_entry.full_name, success=True, continue_processing=True)
+
+        circuit_permit = get_plugin_circuit_breaker().try_acquire(
+            handler_entry.plugin_id,
+            handler_entry.full_name,
+            f"event:{event_type}",
+        )
+        if not circuit_permit.allowed:
+            return EventResult(handler_name=handler_entry.full_name, success=True, continue_processing=True)
+
         try:
             resp_envelope = await supervisor.invoke_plugin(
                 "plugin.emit_event", handler_entry.plugin_id, handler_entry.name, args
             )
+            get_plugin_circuit_breaker().record_success(circuit_permit)
             resp = resp_envelope.payload
             result = EventResult(
                 handler_name=handler_entry.full_name,
@@ -169,6 +202,11 @@ class EventDispatcher:
                 modified_message=resp.get("modified_message"),
                 custom_result=resp.get("custom_result"),
             )
+        except RPCError as e:
+            if self._should_record_circuit_failure(e):
+                get_plugin_circuit_breaker().record_failure(circuit_permit, str(e))
+            logger.error(f"EventHandler {handler_entry.full_name} 执行失败: {e}", exc_info=True)
+            result = EventResult(handler_name=handler_entry.full_name, success=False, continue_processing=True)
         except Exception as e:
             logger.error(f"EventHandler {handler_entry.full_name} 执行失败: {e}", exc_info=True)
             result = EventResult(handler_name=handler_entry.full_name, success=False, continue_processing=True)
@@ -182,3 +220,9 @@ class EventDispatcher:
                 self._result_history[event_type] = history_list[-_MAX_HISTORY_LENGTH:]
 
         return result
+
+    @staticmethod
+    def _should_record_circuit_failure(exc: RPCError) -> bool:
+        """判断 RPC 异常是否应计入插件熔断。"""
+
+        return exc.code in {ErrorCode.E_TIMEOUT, ErrorCode.E_PLUGIN_CRASHED}

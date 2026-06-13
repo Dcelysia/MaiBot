@@ -2,15 +2,15 @@ from typing import TYPE_CHECKING
 
 from src.common.logger import get_logger
 from src.plugin_runtime.host.capability_service import CapabilityImpl
-from src.plugin_runtime.host.supervisor import PluginSupervisor
 
 if TYPE_CHECKING:
+    from src.plugin_runtime.host.supervisor import PluginSupervisor
     from src.plugin_runtime.integration import PluginRuntimeManager
 
 logger = get_logger("plugin_runtime.integration")
 
 
-def register_capability_impls(manager: "PluginRuntimeManager", supervisor: PluginSupervisor) -> None:
+def register_capability_impls(manager: "PluginRuntimeManager", supervisor: "PluginSupervisor") -> None:
     """向指定 Supervisor 注册主程序提供的能力实现。"""
     cap_service = supervisor.capability_service
 
@@ -26,11 +26,15 @@ def register_capability_impls(manager: "PluginRuntimeManager", supervisor: Plugi
     _register("send.text", manager._cap_send_text)
     _register("send.emoji", manager._cap_send_emoji)
     _register("send.image", manager._cap_send_image)
+    _register("send.forward", manager._cap_send_forward)
+    _register("send.hybrid", manager._cap_send_hybrid)
     _register("send.command", manager._cap_send_command)
     _register("send.custom", manager._cap_send_custom)
 
     _register("llm.generate", manager._cap_llm_generate)
     _register("llm.generate_with_tools", manager._cap_llm_generate_with_tools)
+    _register("llm.embed", manager._cap_llm_embed)
+    _register("llm.transcribe_audio", manager._cap_llm_transcribe_audio)
     _register("llm.get_available_models", manager._cap_llm_get_available_models)
 
     _register("config.get", manager._cap_config_get)
@@ -46,6 +50,7 @@ def register_capability_impls(manager: "PluginRuntimeManager", supervisor: Plugi
     _register("chat.get_all_streams", manager._cap_chat_get_all_streams)
     _register("chat.get_group_streams", manager._cap_chat_get_group_streams)
     _register("chat.get_private_streams", manager._cap_chat_get_private_streams)
+    _register("chat.open_session", manager._cap_chat_open_session)
     _register("chat.get_stream_by_group_id", manager._cap_chat_get_stream_by_group_id)
     _register("chat.get_stream_by_user_id", manager._cap_chat_get_stream_by_user_id)
 
@@ -55,6 +60,9 @@ def register_capability_impls(manager: "PluginRuntimeManager", supervisor: Plugi
     _register("message.get_recent", manager._cap_message_get_recent)
     _register("message.count_new", manager._cap_message_count_new)
     _register("message.build_readable", manager._cap_message_build_readable)
+
+    _register("maisaka.context.append", manager._cap_maisaka_context_append)
+    _register("maisaka.proactive.trigger", manager._cap_maisaka_proactive_trigger)
 
     _register("person.get_id", manager._cap_person_get_id)
     _register("person.get_value", manager._cap_person_get_value)
@@ -83,6 +91,7 @@ def register_capability_impls(manager: "PluginRuntimeManager", supervisor: Plugi
     _register("component.get_all_plugins", manager._cap_component_get_all_plugins)
     _register("component.get_plugin_info", manager._cap_component_get_plugin_info)
     _register("component.get_plugin_config_schema", manager._cap_component_get_plugin_config_schema)
+    _register("component.update_plugin_config", manager._cap_component_update_plugin_config)
     _register("component.list_loaded_plugins", manager._cap_component_list_loaded_plugins)
     _register("component.list_registered_plugins", manager._cap_component_list_registered_plugins)
     _register("component.enable", manager._cap_component_enable)

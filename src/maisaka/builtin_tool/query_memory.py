@@ -15,6 +15,7 @@ from .context import BuiltinToolRuntimeContext
 logger = get_logger("maisaka_builtin_query_memory")
 
 _ALLOWED_QUERY_MODES = {"search", "time", "hybrid", "episode", "aggregate"}
+REPLYER_MEMORY_REFERENCE_MARKER = "【长期记忆检索结果-内部参考】"
 
 
 def get_tool_spec(*, enabled: bool = True) -> ToolSpec:
@@ -22,17 +23,7 @@ def get_tool_spec(*, enabled: bool = True) -> ToolSpec:
 
     return ToolSpec(
         name="query_memory",
-        brief_description="检索 A_memorix 长期记忆并返回可读结果。",
-        detailed_description=(
-            "参数说明：\n"
-            "- query：string，可选。要检索的关键词或问题。\n"
-            "- limit：integer，可选。返回条数，默认使用系统配置值。\n"
-            "- mode：string，可选。search/time/hybrid/episode/aggregate。\n"
-            "- person_name：string，可选。人物名，优先用于解析并过滤 person_id。\n"
-            "- time_start：string，可选。起始时间，可填写时间戳或可解析时间文本。\n"
-            "- time_end：string，可选。结束时间，可填写时间戳或可解析时间文本。\n"
-            "- respect_filter：boolean，可选。是否应用聊天过滤配置，默认 true。"
-        ),
+        description="检索长期记忆并返回可读结果。",
         parameters_schema={
             "type": "object",
             "properties": {
@@ -46,7 +37,7 @@ def get_tool_spec(*, enabled: bool = True) -> ToolSpec:
                 },
                 "mode": {
                     "type": "string",
-                    "description": "检索模式：search/time/hybrid/episode/aggregate。",
+                    "description": "检索模式：search/time/hybrid/episode/aggregate。`search` 查事实或偏好，`time` 查某段时间，`episode` 查某次经历，`aggregate` 查整体情况；拿不准时用 `hybrid`。",
                     "enum": sorted(_ALLOWED_QUERY_MODES),
                     "default": "search",
                 },
@@ -128,7 +119,7 @@ def _build_success_content(result: MemorySearchResult, *, limit: int) -> str:
     """构造工具成功时的可读内容。"""
 
     summary = str(result.summary or "").strip()
-    snippet = result.to_text(limit=max(1, int(limit)))
+    snippet = result.to_text(limit=max(1, int(limit)), truncate_content=False)
 
     if result.hits:
         if snippet:
@@ -140,6 +131,47 @@ def _build_success_content(result: MemorySearchResult, *, limit: int) -> str:
     if result.filtered:
         return "当前请求被聊天过滤策略跳过，未执行长期记忆检索。"
     return "未找到匹配的长期记忆。"
+
+
+def _build_replyer_memory_reference(structured_content: Dict[str, Any]) -> str:
+    """构造自动透传给 replyer 的长期记忆参考。"""
+
+    raw_hits = structured_content.get("hits")
+    if not isinstance(raw_hits, list):
+        return ""
+
+    lines = [REPLYER_MEMORY_REFERENCE_MARKER]
+    query = str(structured_content.get("query") or "").strip()
+    mode = str(structured_content.get("mode") or "").strip()
+    effective_mode = str(structured_content.get("effective_mode") or "").strip()
+    if query:
+        lines.append(f"查询：{query}")
+    if mode:
+        mode_text = mode
+        if effective_mode and effective_mode != mode:
+            mode_text = f"{mode} -> {effective_mode}"
+        lines.append(f"模式：{mode_text}")
+
+    hit_lines: list[str] = []
+    for index, raw_hit in enumerate(raw_hits, start=1):
+        if not isinstance(raw_hit, dict):
+            continue
+        content = str(raw_hit.get("content") or "").strip()
+        if not content:
+            continue
+        hit_type = str(raw_hit.get("type") or "").strip()
+        title = str(raw_hit.get("title") or "").strip()
+        label_parts = [part for part in (title, hit_type) if part]
+        label = f"（{' / '.join(label_parts)}）" if label_parts else ""
+        normalized_content = " ".join(content.split())
+        hit_lines.append(f"{index}. {label}{normalized_content}")
+
+    if not hit_lines:
+        return ""
+
+    lines.append(f"命中：{len(hit_lines)} 条")
+    lines.extend(hit_lines)
+    return "\n".join(lines)
 
 
 async def handle_tool(
@@ -161,7 +193,7 @@ async def handle_tool(
             f"不支持的检索模式：{mode}。可选值：search/time/hybrid/episode/aggregate。",
         )
 
-    default_limit = max(1, global_config.memory.memory_query_default_limit)
+    default_limit = max(1, global_config.a_memorix.integration.memory_query_default_limit)
     try:
         limit = int(invocation.arguments.get("limit", default_limit) or default_limit)
     except (TypeError, ValueError):
@@ -298,9 +330,14 @@ async def handle_tool(
     else:
         display_prompt = "你按时间范围查询了长期记忆。"
 
+    metadata: Dict[str, Any] = {"record_display_prompt": display_prompt}
+    replyer_memory_reference = _build_replyer_memory_reference(structured_content)
+    if replyer_memory_reference:
+        metadata["replyer_memory_reference"] = replyer_memory_reference
+
     return tool_ctx.build_success_result(
         invocation.tool_name,
         content,
         structured_content=structured_content,
-        metadata={"record_display_prompt": display_prompt},
+        metadata=metadata,
     )

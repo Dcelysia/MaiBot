@@ -343,11 +343,15 @@ def split_into_sentences_w_remove_punctuation(text: str) -> list[str]:
                     if can_split and char == " " and i > 0 and i < len(text) - 1:
                         prev_char = text[i - 1]
                         next_char = text[i + 1]
-                        # 不分割数字和数字、数字和英文、英文和数字、英文和英文之间的空格
-                        prev_is_alnum = prev_char.isdigit() or is_english_letter(prev_char)
-                        next_is_alnum = next_char.isdigit() or is_english_letter(next_char)
-                        if prev_is_alnum and next_is_alnum:
+                        dash_chars = {"-", "—"}
+                        if prev_char in dash_chars or next_char in dash_chars:
                             can_split = False
+                        else:
+                            # 不分割数字和数字、数字和英文、英文和数字、英文和英文之间的空格
+                            prev_is_alnum = prev_char.isdigit() or is_english_letter(prev_char)
+                            next_is_alnum = next_char.isdigit() or is_english_letter(next_char)
+                            if prev_is_alnum and next_is_alnum:
+                                can_split = False
 
             if can_split:
                 # 只有当当前段不为空时才添加
@@ -392,7 +396,12 @@ def split_into_sentences_w_remove_punctuation(text: str) -> list[str]:
 
         # 检查是否可以与下一段合并
         # 条件：不是最后一段，且随机数小于合并概率，且当前段有内容（避免合并空段）
-        if idx + 1 < len(segments) and random.random() < merge_probability and current_content:
+        if (
+            idx + 1 < len(segments)
+            and current_content
+            and current_sep != "\n"
+            and random.random() < merge_probability
+        ):
             next_content, next_sep = segments[idx + 1]
             # 合并: (内容1 + 分隔符1 + 内容2, 分隔符2)
             # 只有当下一段也有内容时才合并文本，否则只传递分隔符
@@ -415,9 +424,33 @@ def split_into_sentences_w_remove_punctuation(text: str) -> list[str]:
     final_sentences = [
         s for s in final_sentences if s.strip()
     ]  # 过滤掉空字符串以及仅包含空白（如换行符、空格）的字符串
+    final_sentences = [
+        normalized_sentence
+        for sentence in final_sentences
+        if (normalized_sentence := re.sub(r"[^\S\r\n]*[\r\n]+[^\S\r\n]*", " ", sentence).strip())
+    ]
 
     logger.debug(f"分割并合并后的句子: {final_sentences}")
     return final_sentences
+
+
+def merge_sentences_to_max_count(sentences: list[str], max_count: int) -> list[str]:
+    """按顺序将分句合并到指定条数以内。"""
+
+    if len(sentences) <= max_count:
+        return sentences
+
+    merged_sentences: list[str] = []
+    sentence_count = len(sentences)
+    start_index = 0
+    for group_index in range(max_count):
+        remaining_sentences = sentence_count - start_index
+        remaining_groups = max_count - group_index
+        group_size = (remaining_sentences + remaining_groups - 1) // remaining_groups
+        merged_sentences.append("".join(sentences[start_index : start_index + group_size]))
+        start_index += group_size
+
+    return merged_sentences
 
 
 def random_remove_punctuation(text: str) -> str:
@@ -486,6 +519,7 @@ def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese
     # 对清理后的文本进行进一步处理
     max_length = global_config.response_splitter.max_length * 2
     max_sentence_num = global_config.response_splitter.max_sentence_num
+    max_split_num = global_config.response_splitter.max_split_num
     # 如果基本上是中文，则进行长度过滤
     if get_western_ratio(cleaned_text) < 0.1 and len(cleaned_text) > max_length:
         logger.warning(f"回复过长 ({len(cleaned_text)} 字符)，返回默认回复")
@@ -527,6 +561,8 @@ def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese
         else:
             logger.warning(f"分割后消息数量过多 ({len(sentences)} 条)，返回默认回复")
             return [_get_random_default_reply()]
+
+    sentences = merge_sentences_to_max_count(sentences, max_split_num)
 
     # if extracted_contents:
     #     for content in extracted_contents:
@@ -573,6 +609,11 @@ def calculate_typing_time(
         total_time += chinese_time if "\u4e00" <= char <= "\u9fff" else english_time
     if is_emoji:
         total_time = 1
+
+    typing_speed = global_config.chat.typing_speed
+    if typing_speed <= 0:
+        return 0
+    total_time *= typing_speed
 
     # if time.time() - thinking_start_time > 10:
     #     total_time = 1

@@ -172,12 +172,11 @@ class PluginMessageUtils:
             return ""
 
         try:
-            from pathlib import Path
-
             from sqlmodel import select
 
             from src.common.database.database import get_db_session
             from src.common.database.database_model import Images, ImageType
+            from src.common.utils.image_path import resolve_stored_image_path
 
             target_image_type = ImageType.IMAGE if image_type == "image" else ImageType.EMOJI
             with get_db_session(auto_commit=False) as db:
@@ -186,12 +185,12 @@ class PluginMessageUtils:
             if image_record is None or image_record.no_file_flag:
                 return ""
 
-            image_path = Path(image_record.full_path)
+            image_path = resolve_stored_image_path(image_record.full_path)
             if not image_path.is_file():
                 return ""
             return base64.b64encode(image_path.read_bytes()).decode("utf-8")
         except Exception as exc:
-            logger.debug("通过 hash 加载历史媒体失败: type=%s hash=%s error=%s", image_type, binary_hash, exc)
+            logger.debug(f"通过 hash 加载历史媒体失败: type={image_type} hash={binary_hash} error={exc}")
             return ""
 
     @staticmethod

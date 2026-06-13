@@ -4,14 +4,15 @@
 基于SQLite的元数据管理，存储段落、实体、关系等信息。
 """
 
-import sqlite3
-import pickle
 import json
-import uuid
+import pickle
 import re
+import sqlite3
+import time
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union, List, Dict, Any, Tuple, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from src.common.logger import get_logger
 from ..utils.hash import compute_hash, normalize_text
@@ -34,7 +35,7 @@ except Exception:
 logger = get_logger("A_Memorix.MetadataStore")
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 RUNTIME_AUTO_MIGRATION_MIN_SCHEMA_VERSION = 9
 
 
@@ -72,7 +73,7 @@ class MetadataStore:
         self._is_initialized = False
         self._db_path: Optional[Path] = None
 
-        logger.info(f"MetadataStore 初始化: db={db_name}")
+        logger.debug(f"元数据存储初始化: db={db_name}")
 
     def connect(
         self,
@@ -114,7 +115,7 @@ class MetadataStore:
         self._conn.execute("PRAGMA temp_store=MEMORY")
         self._conn.execute("PRAGMA foreign_keys = ON") # 开启外键约束支持级联删除
 
-        logger.info(f"连接到数据库: {db_path}")
+        logger.info(f"数据库已连接: {db_path}")
 
         # 初始化或校验 schema
         if not self._is_initialized:
@@ -162,20 +163,16 @@ class MetadataStore:
     def _run_runtime_auto_migration(self, *, current_version: int) -> None:
         """对 1.0 之后的已版本化库执行轻量自动迁移。"""
         logger.info(
-            "检测到 metadata schema 需要运行时自动迁移: current=%s, target=%s",
-            current_version,
-            SCHEMA_VERSION,
+            f"检测到 metadata schema 需要运行时自动迁移: current={current_version}, target={SCHEMA_VERSION}",
         )
         self._migrate_schema()
         alias_result = self.rebuild_relation_hash_aliases()
         knowledge_type_result = self.normalize_paragraph_knowledge_types()
         self.set_schema_version(SCHEMA_VERSION)
         logger.info(
-            "metadata schema 运行时自动迁移完成: %s -> %s, alias_inserted=%s, knowledge_normalized=%s",
-            current_version,
-            SCHEMA_VERSION,
-            int(alias_result.get("inserted", 0) or 0),
-            int(knowledge_type_result.get("normalized", 0) or 0),
+            f"metadata schema 运行时自动迁移完成: {current_version} -> {SCHEMA_VERSION}, "
+            f"alias_inserted={int(alias_result.get('inserted', 0) or 0)}, "
+            f"knowledge_normalized={int(knowledge_type_result.get('normalized', 0) or 0)}",
         )
 
     def _ensure_memory_feedback_task_columns(self, cursor: sqlite3.Cursor) -> None:
@@ -733,6 +730,7 @@ class MetadataStore:
             CREATE INDEX IF NOT EXISTS idx_delete_operation_items_hash
             ON delete_operation_items(item_hash)
         """)
+        self._create_performance_indexes()
         # 新版 schema 包含完整字段，直接写入版本信息
         cursor.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)", (SCHEMA_VERSION, datetime.now().timestamp()))
         self._conn.commit()
@@ -1212,6 +1210,9 @@ class MetadataStore:
         except Exception as e:
             logger.error(f"数据自动修复失败: {e}")
 
+        self._create_performance_indexes()
+        self._conn.commit()
+
     def _create_temporal_indexes_if_ready(self) -> None:
         """
         仅当时序列已存在时创建索引。
@@ -1235,6 +1236,71 @@ class MetadataStore:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_paragraphs_event_end ON paragraphs(event_time_end)"
             )
+
+    def _create_performance_indexes(self) -> None:
+        """创建热点查询使用的补充索引。"""
+        cursor = self._conn.cursor()
+        cursor.execute("PRAGMA table_info(paragraphs)")
+        paragraph_columns = {row[1] for row in cursor.fetchall()}
+        cursor.execute("PRAGMA table_info(relations)")
+        relation_columns = {row[1] for row in cursor.fetchall()}
+
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_paragraph_relations_relation
+            ON paragraph_relations(relation_hash, paragraph_hash)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_paragraph_entities_entity
+            ON paragraph_entities(entity_hash, paragraph_hash)
+            """
+        )
+        if {"source", "is_deleted", "created_at", "hash"}.issubset(paragraph_columns):
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_paragraphs_source_live_created
+                ON paragraphs(source, is_deleted, created_at, hash)
+                """
+            )
+        if {"subject", "object", "is_inactive"}.issubset(relation_columns):
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_relations_subject_object_active
+                ON relations(LOWER(TRIM(subject)), LOWER(TRIM(object)), is_inactive)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_relations_object_active
+                ON relations(LOWER(TRIM(object)), is_inactive)
+                """
+            )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_episode_pending_status_retry_updated
+            ON episode_pending_paragraphs(status, retry_count, updated_at)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_paragraph_vector_backfill_status_retry_updated
+            ON paragraph_vector_backfill(status, retry_count, updated_at)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_episode_rebuild_status_retry_updated
+            ON episode_rebuild_sources(status, retry_count, requested_at, updated_at)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_person_profile_refresh_status_retry_updated
+            ON person_profile_refresh_queue(status, retry_count, requested_at, updated_at)
+            """
+        )
 
     def run_legacy_migration_for_vnext(self) -> Dict[str, Any]:
         """
@@ -1500,6 +1566,224 @@ class MetadataStore:
             c.rollback()
             return False
 
+    def ensure_paragraph_tokenized_fts_schema(self, conn: Optional[sqlite3.Connection] = None) -> bool:
+        """确保预分词段落 FTS5 shadow index 存在。"""
+        c = self._resolve_conn(conn)
+        cur = c.cursor()
+        try:
+            cur.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS paragraphs_tokenized_fts
+                USING fts5(
+                    paragraph_hash UNINDEXED,
+                    tokenized,
+                    tokenize='unicode61'
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS paragraph_tokenized_fts_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            c.commit()
+            return True
+        except sqlite3.OperationalError as e:
+            logger.warning(f"paragraph tokenized FTS5 schema 创建失败: {e}")
+            c.rollback()
+            return False
+
+    @staticmethod
+    def _paragraph_phrase_tokens(text: str) -> List[str]:
+        return [token.lower() for token in re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]{2,}", str(text or ""))]
+
+    def _tokenize_paragraph_for_fts(self, text: str) -> str:
+        source = str(text or "")
+        if HAS_JIEBA and jieba is not None:
+            try:
+                tokens = [token.strip().lower() for token in jieba.cut_for_search(source) if token.strip()]
+            except Exception:
+                tokens = list(source.lower())
+        else:
+            tokens = list(source.lower())
+        tokens.extend(self._paragraph_phrase_tokens(source))
+        return " ".join(dict.fromkeys(token for token in tokens if token))
+
+    def _refresh_paragraph_tokenized_fts_meta(self, conn: sqlite3.Connection) -> None:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='paragraph_tokenized_fts_meta'")
+        if cur.fetchone() is None:
+            return
+        cur.execute("SELECT COUNT(1) FROM paragraphs WHERE is_deleted IS NULL OR is_deleted = 0")
+        para_count = int(cur.fetchone()[0])
+        cur.execute("""
+            INSERT INTO paragraph_tokenized_fts_meta(key, value) VALUES('paragraph_count', ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """, (str(para_count),))
+        cur.execute("""
+            INSERT INTO paragraph_tokenized_fts_meta(key, value) VALUES('updated_at', ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """, (str(datetime.now().timestamp()),))
+
+    def ensure_paragraph_tokenized_fts_backfilled(self, conn: Optional[sqlite3.Connection] = None) -> bool:
+        """确保预分词段落 FTS5 shadow index 已回填。"""
+        c = self._resolve_conn(conn)
+        cur = c.cursor()
+        started = time.perf_counter()
+        try:
+            if not self.ensure_paragraph_tokenized_fts_schema(conn=c):
+                return False
+            cur.execute("SELECT COUNT(1) FROM paragraphs WHERE is_deleted IS NULL OR is_deleted = 0")
+            para_count = int(cur.fetchone()[0])
+            cur.execute("SELECT value FROM paragraph_tokenized_fts_meta WHERE key='paragraph_count'")
+            meta_row = cur.fetchone()
+            indexed_docs = int(meta_row[0]) if meta_row and meta_row[0] is not None else -1
+            if indexed_docs == para_count:
+                return True
+
+            cur.execute("DELETE FROM paragraphs_tokenized_fts")
+            cur.execute("""
+                SELECT hash, content
+                FROM paragraphs
+                WHERE is_deleted IS NULL OR is_deleted = 0
+            """)
+            batch: List[Tuple[str, str]] = []
+            batch_size = 1000
+            while True:
+                rows = cur.fetchmany(batch_size)
+                if not rows:
+                    break
+                for row in rows:
+                    batch.append((str(row["hash"]), self._tokenize_paragraph_for_fts(str(row["content"] or ""))))
+                cur.executemany(
+                    "INSERT INTO paragraphs_tokenized_fts(paragraph_hash, tokenized) VALUES (?, ?)",
+                    batch,
+                )
+                batch.clear()
+            if batch:
+                cur.executemany(
+                    "INSERT INTO paragraphs_tokenized_fts(paragraph_hash, tokenized) VALUES (?, ?)",
+                    batch,
+                )
+            self._refresh_paragraph_tokenized_fts_meta(c)
+            c.commit()
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            logger.info(
+                "paragraph tokenized FTS 回填完成: "
+                f"paragraphs={para_count}, duration_ms={elapsed_ms:.2f}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"paragraph tokenized FTS 回填失败: {e}")
+            c.rollback()
+            return False
+
+    def fts_upsert_tokenized_paragraph(
+        self,
+        paragraph_hash: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> bool:
+        """增量维护预分词段落 FTS shadow index。"""
+        c = self._resolve_conn(conn)
+        owns_transaction = not c.in_transaction
+        cur = c.cursor()
+        try:
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='paragraphs_tokenized_fts'")
+            if cur.fetchone() is None:
+                return False
+            cur.execute(
+                """
+                SELECT hash, content
+                FROM paragraphs
+                WHERE hash = ?
+                  AND (is_deleted IS NULL OR is_deleted = 0)
+                """,
+                (paragraph_hash,),
+            )
+            row = cur.fetchone()
+            cur.execute("DELETE FROM paragraphs_tokenized_fts WHERE paragraph_hash = ?", (paragraph_hash,))
+            if row:
+                cur.execute(
+                    "INSERT INTO paragraphs_tokenized_fts(paragraph_hash, tokenized) VALUES (?, ?)",
+                    (paragraph_hash, self._tokenize_paragraph_for_fts(str(row["content"] or ""))),
+                )
+            self._refresh_paragraph_tokenized_fts_meta(c)
+            if owns_transaction:
+                c.commit()
+            return True
+        except sqlite3.OperationalError as e:
+            if owns_transaction and c.in_transaction:
+                c.rollback()
+            logger.warning(f"paragraph tokenized FTS upsert 失败: {e}")
+            return False
+
+    def fts_delete_tokenized_paragraph(
+        self,
+        paragraph_hash: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> bool:
+        """从预分词段落 FTS shadow index 删除段落。"""
+        c = self._resolve_conn(conn)
+        owns_transaction = not c.in_transaction
+        cur = c.cursor()
+        try:
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='paragraphs_tokenized_fts'")
+            if cur.fetchone() is None:
+                return False
+            cur.execute("DELETE FROM paragraphs_tokenized_fts WHERE paragraph_hash = ?", (paragraph_hash,))
+            self._refresh_paragraph_tokenized_fts_meta(c)
+            if owns_transaction:
+                c.commit()
+            return True
+        except sqlite3.OperationalError as e:
+            if owns_transaction and c.in_transaction:
+                c.rollback()
+            logger.warning(f"paragraph tokenized FTS delete 失败: {e}")
+            return False
+
+    def fts_search_tokenized_paragraphs_bm25(
+        self,
+        match_query: str,
+        limit: int = 20,
+        max_doc_len: int = 2000,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> List[Dict[str, Any]]:
+        """使用预分词段落 FTS5 shadow index 执行 BM25 检索。"""
+        if not match_query.strip():
+            return []
+
+        c = self._resolve_conn(conn)
+        cur = c.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT p.hash, p.content, bm25(paragraphs_tokenized_fts) AS bm25_score
+                FROM paragraphs_tokenized_fts
+                JOIN paragraphs p ON p.hash = paragraphs_tokenized_fts.paragraph_hash
+                WHERE paragraphs_tokenized_fts MATCH ?
+                  AND (p.is_deleted IS NULL OR p.is_deleted = 0)
+                ORDER BY bm25_score ASC
+                LIMIT ?
+                """,
+                (match_query, max(1, int(limit))),
+            )
+            rows = cur.fetchall()
+            results: List[Dict[str, Any]] = []
+            for row in rows:
+                content = str(row["content"] or "")
+                if max_doc_len > 0:
+                    content = content[:max_doc_len]
+                results.append(
+                    {
+                        "hash": row["hash"],
+                        "content": content,
+                        "bm25_score": float(row["bm25_score"]),
+                    }
+                )
+            return results
+        except sqlite3.OperationalError as e:
+            logger.warning(f"paragraph tokenized FTS 查询失败: {e}")
+            return []
+
     def ensure_paragraph_ngram_schema(self, conn: Optional[sqlite3.Connection] = None) -> bool:
         """确保段落 ngram 倒排表存在。"""
         c = self._resolve_conn(conn)
@@ -1539,6 +1823,139 @@ class MetadataStore:
             return [compact]
         return [compact[i : i + n] for i in range(0, len(compact) - n + 1)]
 
+    def _get_paragraph_ngram_n_if_ready(
+        self,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Optional[int]:
+        """读取已初始化的 paragraph ngram 配置；未初始化时返回 None。"""
+        c = self._resolve_conn(conn)
+        cur = c.cursor()
+        try:
+            cur.execute("SELECT value FROM paragraph_ngram_meta WHERE key='ngram_n'")
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return None
+            return max(1, int(row[0]))
+        except (sqlite3.OperationalError, TypeError, ValueError):
+            return None
+
+    def is_paragraph_ngram_ready(
+        self,
+        n: int = 2,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> bool:
+        """检查 paragraph ngram 索引是否已初始化且与 active 段落数量一致。"""
+        c = self._resolve_conn(conn)
+        cur = c.cursor()
+        try:
+            current_n = self._get_paragraph_ngram_n_if_ready(conn=c)
+            if current_n != max(1, int(n)):
+                return False
+
+            cur.execute("SELECT COUNT(1) FROM paragraphs WHERE is_deleted IS NULL OR is_deleted = 0")
+            para_count = int(cur.fetchone()[0])
+            cur.execute("SELECT value FROM paragraph_ngram_meta WHERE key='paragraph_count'")
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return False
+            indexed_docs = int(row[0])
+            return para_count == indexed_docs
+        except (sqlite3.OperationalError, TypeError, ValueError):
+            return False
+
+    def _set_paragraph_ngram_meta_value(
+        self,
+        key: str,
+        value: str,
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
+        c = self._resolve_conn(conn)
+        c.execute(
+            """
+            INSERT INTO paragraph_ngram_meta(key, value) VALUES(?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (str(key), str(value)),
+        )
+
+    def _adjust_paragraph_ngram_count(
+        self,
+        delta: int,
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
+        """在索引已初始化时维护 active paragraph 计数。"""
+        if delta == 0:
+            return
+        c = self._resolve_conn(conn)
+        cur = c.cursor()
+        try:
+            cur.execute("SELECT value FROM paragraph_ngram_meta WHERE key='paragraph_count'")
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return
+            current = max(0, int(row[0]))
+        except (sqlite3.OperationalError, TypeError, ValueError):
+            return
+        self._set_paragraph_ngram_meta_value(
+            "paragraph_count",
+            str(max(0, current + int(delta))),
+            conn=c,
+        )
+
+    def _upsert_paragraph_ngram_if_ready(
+        self,
+        paragraph_hash: str,
+        content: str,
+        *,
+        count_delta: int = 0,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> bool:
+        """若 ngram 索引已初始化，则只增量维护当前段落。"""
+        c = self._resolve_conn(conn)
+        n = self._get_paragraph_ngram_n_if_ready(conn=c)
+        if n is None:
+            return False
+
+        cur = c.cursor()
+        cur.execute("DELETE FROM paragraph_ngrams WHERE paragraph_hash = ?", (paragraph_hash,))
+        terms = list(dict.fromkeys(self._char_ngrams(content, n)))
+        if terms:
+            cur.executemany(
+                "INSERT OR IGNORE INTO paragraph_ngrams(term, paragraph_hash) VALUES (?, ?)",
+                [(term, paragraph_hash) for term in terms],
+            )
+        self._adjust_paragraph_ngram_count(count_delta, conn=c)
+        return True
+
+    def _delete_paragraph_ngrams_if_ready(
+        self,
+        paragraph_hashes: Sequence[str],
+        *,
+        count_delta: int = 0,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> bool:
+        """若 ngram 索引已初始化，则批量移除段落 ngram。"""
+        hashes = [str(h) for h in paragraph_hashes if str(h or "").strip()]
+        if not hashes:
+            return False
+        c = self._resolve_conn(conn)
+        if self._get_paragraph_ngram_n_if_ready(conn=c) is None:
+            return False
+
+        cur = c.cursor()
+        batch_size = 900
+        for i in range(0, len(hashes), batch_size):
+            batch = hashes[i:i + batch_size]
+            placeholders = ",".join(["?"] * len(batch))
+            cur.execute(
+                f"DELETE FROM paragraph_ngrams WHERE paragraph_hash IN ({placeholders})",
+                batch,
+            )
+        self._adjust_paragraph_ngram_count(count_delta, conn=c)
+        return True
+
     def ensure_paragraph_ngram_backfilled(
         self,
         n: int = 2,
@@ -1552,6 +1969,7 @@ class MetadataStore:
         c = self._resolve_conn(conn)
         cur = c.cursor()
         n = max(1, int(n))
+        started = time.perf_counter()
         try:
             cur.execute("SELECT value FROM paragraph_ngram_meta WHERE key='ngram_n'")
             row = cur.fetchone()
@@ -1559,8 +1977,13 @@ class MetadataStore:
 
             cur.execute("SELECT COUNT(1) FROM paragraphs WHERE is_deleted IS NULL OR is_deleted = 0")
             para_count = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(DISTINCT paragraph_hash) FROM paragraph_ngrams")
-            indexed_docs = int(cur.fetchone()[0])
+            cur.execute("SELECT value FROM paragraph_ngram_meta WHERE key='paragraph_count'")
+            meta_row = cur.fetchone()
+            if meta_row and meta_row[0] is not None:
+                indexed_docs = int(meta_row[0])
+            else:
+                cur.execute("SELECT COUNT(DISTINCT paragraph_hash) FROM paragraph_ngrams")
+                indexed_docs = int(cur.fetchone()[0])
 
             need_rebuild = (current_n != n) or (para_count != indexed_docs)
             if not need_rebuild:
@@ -1576,9 +1999,11 @@ class MetadataStore:
 
             batch: List[Tuple[str, str]] = []
             batch_size = 2000
+            term_count = 0
             for row in rows:
                 p_hash = str(row["hash"])
                 terms = list(dict.fromkeys(self._char_ngrams(str(row["content"] or ""), n)))
+                term_count += len(terms)
                 for term in terms:
                     batch.append((term, p_hash))
                 if len(batch) >= batch_size:
@@ -1601,8 +2026,16 @@ class MetadataStore:
                 INSERT INTO paragraph_ngram_meta(key, value) VALUES('paragraph_count', ?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value
             """, (str(para_count),))
+            cur.execute("""
+                INSERT INTO paragraph_ngram_meta(key, value) VALUES('updated_at', ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """, (str(datetime.now().timestamp()),))
             c.commit()
-            logger.info(f"paragraph ngram 回填完成: n={n}, paragraphs={para_count}")
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            logger.info(
+                "paragraph ngram 回填完成: "
+                f"n={n}, paragraphs={para_count}, terms={term_count}, duration_ms={elapsed_ms:.2f}"
+            )
             return True
         except Exception as e:
             logger.warning(f"paragraph ngram 回填失败: {e}")
@@ -1973,6 +2406,12 @@ class MetadataStore:
                 normalized_time.get("time_confidence", 1.0),
                 resolved_knowledge_type.value,
             ))
+            self._upsert_paragraph_ngram_if_ready(
+                hash_value,
+                content,
+                count_delta=1,
+            )
+            self.fts_upsert_tokenized_paragraph(hash_value)
             self._conn.commit()
             try:
                 self.enqueue_episode_source_rebuild(
@@ -2253,6 +2692,31 @@ class MetadataStore:
             return self._row_to_dict(row, "paragraph")
         return None
 
+    def get_paragraphs_by_hashes(
+        self,
+        hash_values: Sequence[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """批量获取段落，按输入 hash 去重后返回 hash -> paragraph。"""
+        normalized = self._normalize_hash_sequence(hash_values)
+        if not normalized:
+            return {}
+
+        out: Dict[str, Dict[str, Any]] = {}
+        cursor = self._conn.cursor()
+        for batch in self._iter_sql_batches(normalized):
+            placeholders = ",".join(["?"] * len(batch))
+            cursor.execute(
+                f"""
+                SELECT * FROM paragraphs
+                WHERE hash IN ({placeholders})
+                """,
+                tuple(batch),
+            )
+            for row in cursor.fetchall():
+                payload = self._row_to_dict(row, "paragraph")
+                out[str(payload.get("hash", "") or "")] = payload
+        return out
+
     def update_paragraph_time_meta(
         self,
         paragraph_hash: str,
@@ -2392,6 +2856,31 @@ class MetadataStore:
             return self._row_to_dict(row, "entity")
         return None
 
+    def get_entities_by_hashes(
+        self,
+        hash_values: Sequence[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """批量获取实体，按输入 hash 去重后返回 hash -> entity。"""
+        normalized = self._normalize_hash_sequence(hash_values)
+        if not normalized:
+            return {}
+
+        out: Dict[str, Dict[str, Any]] = {}
+        cursor = self._conn.cursor()
+        for batch in self._iter_sql_batches(normalized):
+            placeholders = ",".join(["?"] * len(batch))
+            cursor.execute(
+                f"""
+                SELECT * FROM entities
+                WHERE hash IN ({placeholders})
+                """,
+                tuple(batch),
+            )
+            for row in cursor.fetchall():
+                payload = self._row_to_dict(row, "entity")
+                out[str(payload.get("hash", "") or "")] = payload
+        return out
+
     def get_relation(self, hash_value: str, include_inactive: bool = True) -> Optional[Dict[str, Any]]:
         """
         获取关系
@@ -2424,6 +2913,34 @@ class MetadataStore:
         if row:
             return self._row_to_dict(row, "relation")
         return None
+
+    def get_relations_by_hashes(
+        self,
+        hash_values: Sequence[str],
+        include_inactive: bool = True,
+    ) -> Dict[str, Dict[str, Any]]:
+        """批量获取关系，按输入 hash 去重后返回 hash -> relation。"""
+        normalized = self._normalize_hash_sequence(hash_values)
+        if not normalized:
+            return {}
+
+        out: Dict[str, Dict[str, Any]] = {}
+        cursor = self._conn.cursor()
+        inactive_sql = "" if include_inactive else "AND (is_inactive IS NULL OR is_inactive = 0)"
+        for batch in self._iter_sql_batches(normalized):
+            placeholders = ",".join(["?"] * len(batch))
+            cursor.execute(
+                f"""
+                SELECT * FROM relations
+                WHERE hash IN ({placeholders})
+                  {inactive_sql}
+                """,
+                tuple(batch),
+            )
+            for row in cursor.fetchall():
+                payload = self._row_to_dict(row, "relation")
+                out[str(payload.get("hash", "") or "")] = payload
+        return out
 
     def get_paragraph_relations(self, paragraph_hash: str) -> List[Dict[str, Any]]:
         """
@@ -2501,6 +3018,35 @@ class MetadataStore:
         """, (paragraph_hash,))
 
         return [self._row_to_dict(row, "entity") for row in cursor.fetchall()]
+
+    def get_paragraph_entities_by_hashes(
+        self,
+        paragraph_hashes: Sequence[str],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """批量获取段落实体映射，返回 paragraph_hash -> entities。"""
+        normalized = self._normalize_hash_sequence(paragraph_hashes)
+        if not normalized:
+            return {}
+
+        grouped: Dict[str, List[Dict[str, Any]]] = {hash_value: [] for hash_value in normalized}
+        cursor = self._conn.cursor()
+        for batch in self._iter_sql_batches(normalized):
+            placeholders = ",".join(["?"] * len(batch))
+            cursor.execute(
+                f"""
+                SELECT pe.paragraph_hash, e.*, pe.mention_count
+                FROM paragraph_entities pe
+                JOIN entities e ON e.hash = pe.entity_hash
+                WHERE pe.paragraph_hash IN ({placeholders})
+                """,
+                tuple(batch),
+            )
+            for row in cursor.fetchall():
+                paragraph_hash = str(row["paragraph_hash"] or "").strip()
+                if not paragraph_hash:
+                    continue
+                grouped.setdefault(paragraph_hash, []).append(self._row_to_dict(row, "entity"))
+        return grouped
 
     def get_paragraphs_by_entity(self, entity_name: str) -> List[Dict[str, Any]]:
         """
@@ -2602,6 +3148,37 @@ class MetadataStore:
 
         return [self._row_to_dict(row, "paragraph") for row in cursor.fetchall()]
 
+    def get_paragraphs_by_relation_hashes(
+        self,
+        relation_hashes: Sequence[str],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """批量获取关系支撑段落，返回 relation_hash -> paragraphs。"""
+        normalized = self._normalize_hash_sequence(relation_hashes)
+        if not normalized:
+            return {}
+
+        grouped: Dict[str, List[Dict[str, Any]]] = {hash_value: [] for hash_value in normalized}
+        cursor = self._conn.cursor()
+        for batch in self._iter_sql_batches(normalized):
+            placeholders = ",".join(["?"] * len(batch))
+            cursor.execute(
+                f"""
+                SELECT pr.relation_hash, p.*
+                FROM paragraph_relations pr
+                JOIN paragraphs p ON p.hash = pr.paragraph_hash
+                WHERE pr.relation_hash IN ({placeholders})
+                  AND (p.is_deleted IS NULL OR p.is_deleted = 0)
+                ORDER BY pr.relation_hash ASC, p.updated_at DESC, p.created_at DESC, pr.paragraph_hash ASC
+                """,
+                tuple(batch),
+            )
+            for row in cursor.fetchall():
+                relation_hash = str(row["relation_hash"] or "").strip()
+                if not relation_hash:
+                    continue
+                grouped.setdefault(relation_hash, []).append(self._row_to_dict(row, "paragraph"))
+        return grouped
+
     def get_paragraphs_by_source(self, source: str) -> List[Dict[str, Any]]:
         """
         按来源获取段落
@@ -2612,7 +3189,9 @@ class MetadataStore:
         Returns:
             段落列表
         """
-        return self.query("SELECT * FROM paragraphs WHERE source = ?", (source,))
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT * FROM paragraphs WHERE source = ?", (source,))
+        return [self._row_to_dict(row, "paragraph") for row in cursor.fetchall()]
 
     def get_all_sources(self) -> List[Dict[str, Any]]:
         """
@@ -2627,6 +3206,7 @@ class MetadataStore:
             SELECT source, COUNT(*) as count, MAX(created_at) as last_updated 
             FROM paragraphs 
             WHERE source IS NOT NULL AND source != ''
+              AND (is_deleted IS NULL OR is_deleted = 0)
             GROUP BY source
             ORDER BY last_updated DESC
         """)
@@ -2660,6 +3240,17 @@ class MetadataStore:
             是否成功删除
         """
         cursor = self._conn.cursor()
+        cursor.execute(
+            "SELECT is_deleted FROM paragraphs WHERE hash = ?",
+            (hash_value,),
+        )
+        row = cursor.fetchone()
+        was_active = bool(row and (row["is_deleted"] is None or int(row["is_deleted"]) == 0))
+        self._delete_paragraph_ngrams_if_ready(
+            [hash_value],
+            count_delta=-1 if was_active else 0,
+        )
+        self.fts_delete_tokenized_paragraph(hash_value)
         cursor.execute("""
             DELETE FROM paragraphs WHERE hash = ?
         """, (hash_value,))
@@ -3768,11 +4359,22 @@ class MetadataStore:
         """恢复软删除段落。"""
         cursor = self._conn.cursor()
         cursor.execute(
-            "UPDATE paragraphs SET is_deleted=0, deleted_at=NULL WHERE hash=?",
+            "SELECT content FROM paragraphs WHERE hash=? AND is_deleted=1",
             (str(paragraph_hash),),
         )
-        changed = cursor.rowcount > 0
+        row = cursor.fetchone()
+        cursor.execute(
+            "UPDATE paragraphs SET is_deleted=0, deleted_at=NULL WHERE hash=? AND is_deleted=1",
+            (str(paragraph_hash),),
+        )
+        changed = cursor.rowcount > 0 and row is not None
         if changed:
+            self._upsert_paragraph_ngram_if_ready(
+                str(paragraph_hash),
+                str(row["content"] or ""),
+                count_delta=1,
+            )
+            self.fts_upsert_tokenized_paragraph(str(paragraph_hash))
             self._conn.commit()
         return changed
 
@@ -3878,8 +4480,12 @@ class MetadataStore:
             candidate_relations = [row[0] for row in cursor.fetchall()]
 
             # 2. [快照] 确认该段落存在并记录 ID 用于向量删除
-            cursor.execute("SELECT hash, source FROM paragraphs WHERE hash = ?", (paragraph_hash,))
+            cursor.execute("SELECT hash, source, is_deleted FROM paragraphs WHERE hash = ?", (paragraph_hash,))
             paragraph_row = cursor.fetchone()
+            paragraph_was_active = bool(
+                paragraph_row
+                and (paragraph_row["is_deleted"] is None or int(paragraph_row["is_deleted"]) == 0)
+            )
             if paragraph_row:
                 cleanup_plan["vector_id_to_remove"] = paragraph_hash
                 cleanup_plan["episode_sources_to_rebuild"] = self._dedupe_episode_sources(
@@ -3887,6 +4493,12 @@ class MetadataStore:
                 )
 
             # 3. [主删除] 删除段落 (触发 CASCADE 删 paragraph_relations)
+            self._delete_paragraph_ngrams_if_ready(
+                [paragraph_hash],
+                count_delta=-1 if paragraph_was_active else 0,
+                conn=self._conn,
+            )
+            self.fts_delete_tokenized_paragraph(paragraph_hash, conn=self._conn)
             cursor.execute("DELETE FROM paragraphs WHERE hash = ?", (paragraph_hash,))
 
             # 4. [计算孤儿]
@@ -4387,6 +4999,25 @@ class MetadataStore:
 
         return d
 
+    @staticmethod
+    def _normalize_hash_sequence(hash_values: Sequence[str]) -> List[str]:
+        """规范化 hash 列表并保持首次出现顺序。"""
+        normalized: List[str] = []
+        seen = set()
+        for item in hash_values or []:
+            token = str(item or "").strip()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            normalized.append(token)
+        return normalized
+
+    @staticmethod
+    def _iter_sql_batches(items: Sequence[str], batch_size: int = 900) -> List[List[str]]:
+        """按 SQLite 参数数量限制切分批量查询。"""
+        safe_batch_size = max(1, int(batch_size))
+        return [list(items[index : index + safe_batch_size]) for index in range(0, len(items), safe_batch_size)]
+
     @property
     def is_connected(self) -> bool:
         """是否已连接"""
@@ -4540,7 +5171,15 @@ class MetadataStore:
                 SET is_deleted = 1, deleted_at = ?
                 WHERE is_deleted = 0 AND hash IN ({placeholders})
             """, [now] + batch)
-            count += cursor.rowcount
+            changed = cursor.rowcount
+            count += changed
+            if type_ == "paragraph" and changed > 0:
+                self._delete_paragraph_ngrams_if_ready(
+                    batch,
+                    count_delta=-changed,
+                )
+                for paragraph_hash in batch:
+                    self.fts_delete_tokenized_paragraph(str(paragraph_hash))
             
         self._conn.commit()
         if type_ == "paragraph" and count > 0:
@@ -4599,9 +5238,28 @@ class MetadataStore:
         """物理删除段落 (批量)"""
         if not hashes: return 0
         touched_sources = self._get_sources_for_paragraph_hashes(hashes, include_deleted=True)
+        active_delete_count = 0
+        batch_size = 900
+        for i in range(0, len(hashes), batch_size):
+            batch = hashes[i:i+batch_size]
+            placeholders = ",".join(["?"] * len(batch))
+            cursor = self._conn.cursor()
+            cursor.execute(f"""
+                SELECT hash
+                FROM paragraphs
+                WHERE (is_deleted IS NULL OR is_deleted = 0)
+                  AND hash IN ({placeholders})
+            """, batch)
+            active_batch = [str(row["hash"]) for row in cursor.fetchall()]
+            active_delete_count += len(active_batch)
+        self._delete_paragraph_ngrams_if_ready(
+            hashes,
+            count_delta=-active_delete_count,
+        )
+        for paragraph_hash in hashes:
+            self.fts_delete_tokenized_paragraph(str(paragraph_hash))
         
         count = 0
-        batch_size = 900
         for i in range(0, len(hashes), batch_size):
             batch = hashes[i:i+batch_size]
             placeholders = ",".join(["?"] * len(batch))
@@ -4609,6 +5267,8 @@ class MetadataStore:
             cursor = self._conn.cursor()
             cursor.execute(f"DELETE FROM paragraphs WHERE hash IN ({placeholders})", batch)
             count += cursor.rowcount
+        if count > 0:
+            self._refresh_paragraph_tokenized_fts_meta(self._conn)
             
         self._conn.commit()
         if count > 0:
@@ -4648,11 +5308,26 @@ class MetadataStore:
                 
                 cursor = self._conn.cursor()
                 cursor.execute(f"""
+                    SELECT hash, content
+                    FROM paragraphs
+                    WHERE is_deleted = 1 AND hash IN ({placeholders})
+                """, batch)
+                revive_rows = cursor.fetchall()
+                cursor.execute(f"""
                     UPDATE paragraphs
                     SET is_deleted = 0, deleted_at = NULL
                     WHERE is_deleted = 1 AND hash IN ({placeholders})
                 """, batch)
-                count += cursor.rowcount
+                changed = cursor.rowcount
+                count += changed
+                if changed > 0:
+                    for row in revive_rows:
+                        self._upsert_paragraph_ngram_if_ready(
+                            str(row["hash"]),
+                            str(row["content"] or ""),
+                            count_delta=1,
+                        )
+                        self.fts_upsert_tokenized_paragraph(str(row["hash"]))
         else:
             touched_sources = []
         

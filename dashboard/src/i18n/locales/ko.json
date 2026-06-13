@@ -2,6 +2,8 @@
   "header": {
     "collapseSidebar": "사이드바 접기",
     "expandSidebar": "사이드바 펼치기",
+    "collapseTopbar": "상단 바 접기",
+    "expandTopbar": "상단 바 펼치기",
     "toggleConnection": "백엔드 연결 전환",
     "viewAnnualSummary": "연간 요약 보기",
     "annualSummary": "2025 연간 요약",
@@ -12,6 +14,8 @@
     "switchToDark": "다크 모드로 전환",
     "logout": "로그아웃",
     "logoutLabel": "로그아웃",
+    "switchLanguage": "언어 전환",
+    "moreActions": "더 많은 작업",
     "notConnected": "연결 안됨"
   },
   "sidebar": {
@@ -28,10 +32,12 @@
       "aiModelProvider": "AI 모델 공급자",
       "modelManagement": "모델 관리",
       "promptManagement": "Prompt 관리",
+      "promptGenerator": "페르소나 생성기 (테스트 기능)",
       "adapterConfig": "어댑터 설정",
       "emojiManagement": "이모티콘 관리",
       "expressionManagement": "표현 관리",
       "slangManagement": "슬랭 관리",
+      "behaviorLearning": "행동 학습",
       "personInfo": "인물 정보",
       "knowledgeGraph": "장기 기억 그래프",
       "knowledgeBase": "장기 기억",
@@ -40,6 +46,7 @@
       "pluginConfig": "플러그인 관리",
       "mcpSettings": "MCP 설정",
       "logViewer": "로그 뷰어",
+      "reasoningProcess": "추론 과정",
       "maisakaMonitor": "MaiSaka 채팅 모니터",
       "localChat": "로컬 채팅",
       "settings": "설정"
@@ -48,7 +55,8 @@
   "workspace": {
     "switcherLabel": "MaiBot 작업 공간 전환",
     "settings": "麦麦 설정",
-    "chat": "麦麦 채팅"
+    "chat": "麦麦 채팅",
+    "logs": "麦麦 로그"
   },
   "chat": {
     "defaultTab": "WebUI",
@@ -205,8 +213,8 @@
       "lightDesc": "항상 라이트 테마 사용",
       "darkDesc": "항상 다크 테마 사용",
       "systemDesc": "시스템 설정에 따라 자동 전환",
-      "accentPrimary": "링 컴러",
-      "accentHint": "색상 퐹을 클릭하거나 HEX 값을 입력하세요",
+      "accentPrimary": "링 컬러",
+      "accentHint": "색상 링을 클릭하거나 HEX 값을 입력하세요",
       "resetTheme": "기본값으로 재설정",
       "confirmResetTheme": "테마 재설정 확인",
       "confirmResetThemeDesc": "이렇게 하면 색상, 글꼴, 레이아웃 및 사용자 정의 CSS를 포함한 모든 테마 설정이 기본값으로 재설정됩니다. 이 작업은 되돌릴 수 없습니다. 계속하시겠습니까?",
@@ -219,7 +227,7 @@
       "importSuccessDesc": "테마 설정을 가져왔습니다. 페이지가 자동으로 새로고침됩니다",
       "resetSuccessDesc": "테마가 기본값으로 재설정되었습니다",
       "enableAnimations": "애니메이션 활성화",
-      "enableAnimationsDesc": "비활성화하면 모든 전환 애니메이션과 효과가 긺히고 성능이 향상됩니다",
+      "enableAnimationsDesc": "비활성화하면 모든 전환 애니메이션과 효과가 꺼지고 성능이 향상됩니다",
       "loginWavesBackground": "로그인 페이지 파도 배경",
       "loginWavesBackgroundDesc": "비활성화하면 로그인 페이지가 단색 배경이 됩니다. 저사양 디바이스에 적합합니다",
       "inheritParentBg": "상위 배경 상속",
@@ -233,7 +241,7 @@
       "baseFontSize": "기본 글자 크기 (Base Size)",
       "lineHeight": "줄 높이 (Line Height)",
       "lineHeightPlaceholder": "줄 높이 선택",
-      "lineHeightCompact": "콤팬트 (1.2)",
+      "lineHeightCompact": "콤팩트 (1.2)",
       "lineHeightNormal": "보통 (1.5)",
       "lineHeightLoose": "느슨 (1.75)",
       "borderRadiusLabel": "테두리 반경 (Radius)",
@@ -244,8 +252,8 @@
       "shadowMd": "중간 (Medium)",
       "shadowLg": "강함 (Large)",
       "shadowXl": "매우 강함 (Extra Large)",
-      "blurLabel": "흘림 효과 (Blur)",
-      "sidebarWidthLabel": "사이드바드 너비 (Sidebar Width)",
+      "blurLabel": "흐림 효과 (Blur)",
+      "sidebarWidthLabel": "사이드바 너비 (Sidebar Width)",
       "maxContentWidth": "콘텐츠 최대 너비 (Max Width)",
       "spacingUnit": "기본 간격 (Spacing Unit)",
       "animationSpeedLabel": "애니메이션 속도 (Speed)",
@@ -255,7 +263,7 @@
       "animationSlow": "느림 (500ms)",
       "animationOff": "끄기 (0ms)",
       "bgPage": "페이지",
-      "bgSidebar": "사이드바드",
+      "bgSidebar": "사이드바",
       "typographyGroup": "타이포그래피 (Typography)",
       "visualGroup": "시각 효과 (Visual)",
       "layoutGroup": "레이아웃 (Layout)",
@@ -485,7 +493,7 @@
     "slowLink": "인터페이스가 느립니다. 어떻게 하나요?",
     "disableAnimTitle": "배경 애니메이션 비활성화",
     "disableAnimDesc": "배경 애니메이션은 저사양 디바이스에서 느리게 동작할 수 있습니다. 비활성화하면 화면이 훨씬 부드러워집니다.",
-    "disableAnimDetail": "비활성화 후 배경은 단색으로 바뀐지지만 모든 기능은 정상 작동합니다. 시스템 설정에서 언제든지 다시 활성화할 수 있습니다.",
+    "disableAnimDetail": "비활성화 후 배경은 단색으로 바뀌지만 모든 기능은 정상 작동합니다. 시스템 설정에서 언제든지 다시 활성화할 수 있습니다.",
     "disableAnimBtn": "애니메이션 비활성화",
     "verifyFailed": "Token 확인에 실패했습니다. 확인 후 다시 시도해 주세요.",
     "connFailed": "서버에 연결하지 못했습니다. 네트워크 연결을 확인해 주세요.",
@@ -626,11 +634,11 @@
         "multipleReplyStyle": {
           "label": "대체 답변 스타일",
           "placeholder": "한 줄에 하나씩 대체 답변 스타일을 입력하세요",
-          "description": "목록이 비어 있지 않으면 MaiBot 이 아래 확률에 따라 기본 답변 스타일을 무작위로 대체합니다"
+          "description": "목록이 비어 있지 않으면 MaiBot 이 아래 확률에 따라 대체 스타일을 일회성 답변 힌트로 주입합니다"
         },
         "multipleProbability": {
-          "label": "대체 스타일 적용 확률",
-          "description": "답변을 만들 때마다 기본 답변 스타일을 대체 스타일로 무작위 교체할 확률입니다"
+          "label": "임시 스타일 주입 확률",
+          "description": "답변을 만들 때마다 일회성 대체 스타일 힌트를 주입할 확률입니다"
         }
       },
       "emoji": {
@@ -711,7 +719,7 @@
     }
   },
   "common": {
-    "loading": "로딩 중...",
+    "loading": "불러오는 중...",
     "error": "오류",
     "retry": "재시도",
     "save": "저장",
@@ -779,6 +787,7 @@
       "modelProviderDesc": "모델 공급자 구성",
       "model": "모델 설정",
       "modelDesc": "모델 매개변수 구성",
+      "promptGeneratorDesc": "문장에서 주입 가능한 페르소나 설정 블록 생성",
       "emoji": "이모티콘 관리",
       "emojiDesc": "속 이모티콘 관리",
       "expression": "표현 관리",
@@ -787,18 +796,20 @@
       "personDesc": "인물 정보 관리",
       "jargon": "슬랭 관리",
       "jargonDesc": "속이 학습한 슬랭 관리",
+      "behaviorLearningDesc": "행동 경험 경로와 검색 결과 보기",
       "statistics": "통계 정보",
       "statisticsDesc": "사용 통계 보기",
       "plugins": "플러그인 마켓",
       "pluginsDesc": "플러그인 탐색 및 설치",
       "logs": "로그 뷰어",
       "logsDesc": "시스템 로그 보기",
+      "reasoningProcessDesc": "Maisaka prompt 추론 로그 보기",
       "settings": "설정",
       "settingsDesc": "시스템 설정 구성"
     }
   },
   "a11y": {
-    "skipToContent": "메인 콘텐츠로 건너뀐기",
+    "skipToContent": "메인 콘텐츠로 건너뛰기",
     "sidebarNav": "메인 내비게이션",
     "closeMenu": "메뉴 닫기",
     "navigatedTo": "{{page}}으로 이동했습니다"
@@ -806,8 +817,8 @@
   "home": {
     "title": "실시간 모니터",
     "subtitle": "MaiBot 실행 상태 및 통계 데이터 개요",
-    "loading": "통계 데이터 로딩 중...",
-    "loadingHint": "MaiBot 실행 데이터를 가져오는 중",
+    "loading": "통계 데이터를 불러오는 중...",
+    "loadingHint": "불러오는 중...",
     "timeRange": {
       "24h": "24시간",
       "7d": "7일",
@@ -816,9 +827,23 @@
     "autoRefresh": "자동 새로고침",
     "botStatus": {
       "title": "MaiBot 상태",
+      "loading": "읽는 중",
       "running": "실행 중",
       "stopped": "중지됨",
-      "uptime": "가동 {{time}}"
+      "unknown": "알 수 없음",
+      "uptime": "가동 {{time}}",
+      "visualEnabled": "비전 활성화",
+      "memoryEnabled": "메모리 활성화"
+    },
+    "versionCard": {
+      "title": "MaiBot 버전",
+      "mainVersion": "코어 버전",
+      "webuiVersion": "WebUI 버전",
+      "latestVersion": "최신 버전",
+      "stableLatest": "최신 안정판",
+      "testLatest": "최신 테스트판",
+      "githubReleases": "GitHub Releases",
+      "unknown": "알 수 없음"
     },
     "quickActions": {
       "title": "빠른 작업",
@@ -827,7 +852,63 @@
       "expressionReview": "표현 검토",
       "viewLogs": "로그 보기",
       "pluginManage": "플러그인 관리",
-      "systemSettings": "시스템 설정"
+      "systemSettings": "시스템 설정",
+      "pluginConfig": "플러그인 설정",
+      "appearanceSettings": "외관 설정",
+      "localCache": "로컬 캐시",
+      "modelProviders": "모델 공급자 설정",
+      "modelList": "모델 목록",
+      "modelTasks": "모델 기능 할당",
+      "botConfig": "코어 설정",
+      "emojiManagement": "이모지 관리",
+      "expressionManagement": "표현 관리",
+      "statistics": "상세 통계 데이터",
+      "customize": "사용자 지정",
+      "empty": "선택한 빠른 바로가기가 없습니다",
+      "add": "바로가기 추가",
+      "descriptions": {
+        "restart": "MaiBot 코어 프로세스 재시작",
+        "expressionReview": "표현 학습 검토 대화상자 열기",
+        "viewLogs": "WebUI 로그 보기",
+        "pluginManage": "플러그인 마켓과 관리 페이지 열기",
+        "systemSettings": "시스템 설정 열기",
+        "pluginConfig": "설치된 플러그인 설정 페이지 열기",
+        "appearanceSettings": "설정 / 외관 열기",
+        "localCache": "설정 / 로컬 캐시 열기",
+        "modelProviders": "모델 관리 / 공급자 설정 열기",
+        "modelList": "모델 관리 / 모델 목록 열기",
+        "modelTasks": "모델 관리 / 기능 할당 열기",
+        "botConfig": "MaiBot 코어 설정 열기",
+        "emojiManagement": "이모지 리소스 관리 열기",
+        "expressionManagement": "표현 관리 열기",
+        "statistics": "maibot_statistics.html 열기"
+      },
+      "categories": {
+        "system": "시스템",
+        "config": "설정",
+        "resource": "리소스",
+        "plugin": "플러그인",
+        "monitor": "모니터",
+        "external": "외부"
+      },
+      "dialog": {
+        "title": "빠른 바로가기 사용자 지정",
+        "description": "홈 빠른 작업 카드에 표시할 바로가기를 선택합니다. 페이지 탭과 플러그인 설정 페이지도 포함할 수 있습니다.",
+        "searchPlaceholder": "바로가기, 플러그인 또는 탭 검색...",
+        "loadingPluginEntries": "플러그인 바로가기를 불러오는 중...",
+        "noMatches": "일치하는 바로가기를 찾지 못했습니다",
+        "restoreDefault": "기본값 복원",
+        "done": "완료"
+      }
+    },
+    "pluginShortcuts": {
+      "baseLabel": "{{plugin}} 설정",
+      "baseDescription": "{{plugin}}의 플러그인 설정 페이지 열기",
+      "tabDescription": "{{plugin}}의 {{tab}} 탭 열기",
+      "fallbackLabel": "플러그인 설정: {{plugin}}",
+      "fallbackTabLabel": "플러그인 설정: {{plugin}} / {{tab}}",
+      "fallbackDescription": "지정한 플러그인 설정 페이지 열기",
+      "fallbackTabDescription": "지정한 플러그인 설정 탭 열기"
     },
     "survey": {
       "title": "피드백 설문",
@@ -836,6 +917,7 @@
       "maibot": "MaiBot 피드백"
     },
     "stats": {
+      "overviewTitle": "통계 개요",
       "totalRequests": "총 요청 수",
       "totalCost": "총 비용",
       "tokenUsage": "토큰 소비",
@@ -852,6 +934,21 @@
       "seconds": "초",
       "hours": "시간",
       "days": "일"
+    },
+    "storage": {
+      "title": "저장소 사용량",
+      "reading": "읽는 중",
+      "summary": "이미지 {{image}} · 이모지 {{emoji}} · 로그 {{logs}} · 데이터베이스 {{database}}",
+      "images": "이미지",
+      "emoji": "이모지",
+      "logs": "로그",
+      "database": "데이터베이스",
+      "files": "{{count}}개 파일",
+      "filesAndRecords": "{{files}}개 파일 · {{records}}개 기록",
+      "databaseDetail": "{{files}}개 파일 · {{tables}}개 테이블",
+      "readingDescription": "로컬 저장소 사용량을 읽는 중...",
+      "unavailable": "로컬 저장소 사용량을 가져오지 못했습니다",
+      "manage": "저장소 관리"
     },
     "charts": {
       "tabs": {

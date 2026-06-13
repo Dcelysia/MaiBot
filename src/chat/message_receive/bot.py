@@ -12,8 +12,9 @@ from src.chat.heart_flow.heartflow_message_processor import HeartFCMessageReceiv
 from src.common.logger import get_logger
 from src.common.utils.utils_message import MessageUtils
 from src.common.utils.utils_session import SessionUtils
-from src.platform_io.route_key_factory import RouteKeyFactory
+from src.config.config import global_config
 from src.core.announcement_manager import global_announcement_manager
+from src.platform_io.route_key_factory import RouteKeyFactory
 from src.plugin_runtime.component_query import component_query_service
 from src.plugin_runtime.hook_payloads import deserialize_session_message, serialize_session_message
 from src.plugin_runtime.hook_schema_utils import build_object_schema
@@ -21,6 +22,7 @@ from src.plugin_runtime.host.hook_dispatcher import HookDispatchResult
 from src.plugin_runtime.host.hook_spec_registry import HookSpec, HookSpecRegistry
 
 from .chat_manager import chat_manager
+from .image_receive_compressor import process_received_images_in_message
 from .message import SessionMessage
 
 # 定义日志配置
@@ -56,7 +58,7 @@ def register_chat_hook_specs(registry: HookSpecRegistry) -> List[HookSpec]:
                     },
                     required=["message"],
                 ),
-                default_timeout_ms=8000,
+                default_timeout_ms=0,
                 allow_abort=True,
                 allow_kwargs_mutation=True,
             ),
@@ -72,7 +74,7 @@ def register_chat_hook_specs(registry: HookSpecRegistry) -> List[HookSpec]:
                     },
                     required=["message"],
                 ),
-                default_timeout_ms=8000,
+                default_timeout_ms=0,
                 allow_abort=True,
                 allow_kwargs_mutation=True,
             ),
@@ -100,7 +102,7 @@ def register_chat_hook_specs(registry: HookSpecRegistry) -> List[HookSpec]:
                     },
                     required=["message", "command_name", "plugin_id", "matched_groups"],
                 ),
-                default_timeout_ms=5000,
+                default_timeout_ms=0,
                 allow_abort=True,
                 allow_kwargs_mutation=True,
             ),
@@ -152,7 +154,7 @@ def register_chat_hook_specs(registry: HookSpecRegistry) -> List[HookSpec]:
                         "continue_process",
                     ],
                 ),
-                default_timeout_ms=5000,
+                default_timeout_ms=0,
                 allow_abort=False,
                 allow_kwargs_mutation=True,
             ),
@@ -351,14 +353,14 @@ class ChatBot:
         message.message_info.additional_config["intercept_message_level"] = intercept_message_level
 
     @staticmethod
-    def _store_intercepted_command_message(message: SessionMessage) -> None:
+    async def _store_intercepted_command_message(message: SessionMessage) -> None:
         """将被命令链拦截的消息写入数据库。
 
         Args:
             message: 已完成命令处理的会话消息。
         """
 
-        MessageUtils.store_message_to_db(message)
+        await MessageUtils.store_message_to_db_async(message)
 
     async def _handle_command_processing_result(
         self,
@@ -380,7 +382,7 @@ class ChatBot:
         if continue_process:
             return False
 
-        self._store_intercepted_command_message(message)
+        await self._store_intercepted_command_message(message)
         logger.info(f"命令处理完成，跳过后续消息处理: {cmd_result}")
         return True
 
@@ -470,7 +472,7 @@ class ChatBot:
         if not normalized_mmc_message_id or not normalized_actual_message_id:
             return
 
-        updated = MessageUtils.update_message_id(
+        updated = await MessageUtils.update_message_id_async(
             old_message_id=normalized_mmc_message_id,
             new_message_id=normalized_actual_message_id,
         )
@@ -479,8 +481,7 @@ class ChatBot:
             return
 
         logger.debug(
-            "收到回送消息 ID，但未找到可回填的本地消息: "
-            f"{normalized_mmc_message_id} -> {normalized_actual_message_id}"
+            f"收到回送消息 ID，但未找到可回填的本地消息: {normalized_mmc_message_id} -> {normalized_actual_message_id}"
         )
 
     async def message_process(self, message_data: Dict[str, Any]) -> None:
@@ -536,6 +537,25 @@ class ChatBot:
             )
 
             message.session_id = session_id  # 正确初始化session_id
+            image_process_report = process_received_images_in_message(message.raw_message.components)
+            if image_process_report.compressed_count or image_process_report.discarded_count:
+                image_process_details = []
+                if image_process_report.compressed_count:
+                    image_process_details.append(
+                        f"压缩 {image_process_report.compressed_count} 张，"
+                        f"{image_process_report.original_bytes / 1024:.1f}KB -> "
+                        f"{image_process_report.compressed_bytes / 1024:.1f}KB"
+                    )
+                if image_process_report.discarded_count:
+                    image_process_details.append(
+                        f"丢弃 {image_process_report.discarded_count} 张，"
+                        f"{image_process_report.discarded_bytes / 1024:.1f}KB"
+                    )
+                logger.info(
+                    f"消息 {message.message_id} 入站过大图片处理完成: "
+                    f"{'；'.join(image_process_details)}"
+                )
+
             before_process_result, message = await self._invoke_message_hook(
                 "chat.receive.before_process",
                 message,
@@ -569,7 +589,7 @@ class ChatBot:
             # 入站主链优先保证消息尽快入队，避免图片、表情包、语音分析阻塞适配器超时。
             await message.process(
                 enable_heavy_media_analysis=False,
-                enable_voice_transcription=False,
+                enable_voice_transcription=global_config.voice.enable_asr,
             )
             after_process_result, message = await self._invoke_message_hook(
                 "chat.receive.after_process",
@@ -627,18 +647,6 @@ class ChatBot:
             #     return
             # if modified_message and modified_message._modify_flags.modify_plain_text:
             #     message.processed_plain_text = modified_message.plain_text
-
-            # # 确认从接口发来的message是否有自定义的prompt模板信息
-            # if message.message_info.template_info and not message.message_info.template_info.template_default:
-            #     template_group_name: Optional[str] = message.message_info.template_info.template_name  # type: ignore
-            #     template_items = message.message_info.template_info.template_items
-            #     async with global_prompt_manager.async_message_scope(template_group_name):
-            #         if isinstance(template_items, dict):
-            #             for k in template_items.keys():
-            #                 await Prompt.create_async(template_items[k], k)
-            #                 logger.debug(f"注册{template_items[k]},{k}")
-            # else:
-            #     template_group_name = None
 
             async def preprocess():
                 if group_info is None:

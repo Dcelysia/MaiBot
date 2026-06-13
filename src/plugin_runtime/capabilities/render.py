@@ -1,9 +1,11 @@
 """插件运行时的浏览器渲染能力。"""
 
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
 
 from src.common.logger import get_logger
-from src.services.html_render_service import HtmlRenderRequest, get_html_render_service
+
+if TYPE_CHECKING:
+    from src.services.html_render_service import HtmlRenderRequest
 
 logger = get_logger("plugin_runtime.integration")
 
@@ -67,7 +69,7 @@ class RuntimeRenderCapabilityMixin:
                 return True
         return bool(value)
 
-    def _build_html_render_request(self, args: Dict[str, Any]) -> HtmlRenderRequest:
+    def _build_html_render_request(self, args: Dict[str, Any]) -> "HtmlRenderRequest":
         """根据 capability 调用参数构造渲染请求。
 
         Args:
@@ -77,12 +79,18 @@ class RuntimeRenderCapabilityMixin:
             HtmlRenderRequest: 结构化后的渲染请求。
         """
 
+        from src.services.html_render_service import HtmlRenderRequest
+
         viewport = args.get("viewport", {})
         viewport_width = 900
         viewport_height = 500
         if isinstance(viewport, dict):
             viewport_width = self._coerce_int(viewport.get("width"), viewport_width)
             viewport_height = self._coerce_int(viewport.get("height"), viewport_height)
+
+        render_timeout_ms = args.get("render_timeout_ms")
+        if render_timeout_ms is None:
+            render_timeout_ms = args.get("timeout_ms")
 
         return HtmlRenderRequest(
             html=str(args.get("html", "") or ""),
@@ -95,7 +103,7 @@ class RuntimeRenderCapabilityMixin:
             wait_until=str(args.get("wait_until", "load") or "load"),
             wait_for_selector=str(args.get("wait_for_selector", "") or ""),
             wait_for_timeout_ms=self._coerce_int(args.get("wait_for_timeout_ms"), 0),
-            timeout_ms=self._coerce_int(args.get("timeout_ms"), 0),
+            timeout_ms=self._coerce_int(render_timeout_ms, 0),
             allow_network=self._coerce_bool(args.get("allow_network"), False),
         )
 
@@ -113,6 +121,8 @@ class RuntimeRenderCapabilityMixin:
 
         del plugin_id, capability
         try:
+            from src.services.html_render_service import get_html_render_service
+
             request = self._build_html_render_request(args)
             result = await get_html_render_service().render_html_to_png(request)
             return {"success": True, "result": result.to_payload()}

@@ -9,6 +9,7 @@ import {
 import { TanStackRouterDevtools } from '@tanstack/router-devtools'
 import { NotFoundPage } from './routes/404'
 import { Layout } from './components/layout'
+import { RoutePendingFallback } from './components/route-pending-fallback'
 import { checkAuth } from './hooks/use-auth'
 import { RouteErrorBoundary } from './components/error-boundary'
 
@@ -68,14 +69,13 @@ const botConfigRoute = createRoute({
   component: lazyRouteComponent(() => import('./routes/config/bot'), 'BotConfigPage'),
 })
 
-// 配置路由 - 麦麦模型提供商配置
+// 配置路由 - 旧模型厂商配置入口，已合并到模型配置页
 const modelProviderConfigRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/config/modelProvider',
-  component: lazyRouteComponent(
-    () => import('./routes/config/modelProvider/index.tsx'),
-    'ModelProviderConfigPage'
-  ),
+  beforeLoad: () => {
+    throw redirect({ to: '/config/model' })
+  },
 })
 
 // 配置路由 - 麦麦模型配置
@@ -90,6 +90,13 @@ const promptManagementRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/config/prompts',
   component: lazyRouteComponent(() => import('./routes/config/prompts'), 'PromptManagementPage'),
+})
+
+// 配置路由 - 人设生成器（测试功能）
+const promptGeneratorRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: '/config/prompt-generator',
+  component: lazyRouteComponent(() => import('./routes/prompt-generator'), 'PromptGeneratorPage'),
 })
 
 const adapterConfigRoute = createRoute({
@@ -136,6 +143,15 @@ const jargonManagementRoute = createRoute({
 })
 
 // 资源管理路由 - 知识库图谱可视化
+const behaviorLearningRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: '/resource/behavior',
+  component: lazyRouteComponent(
+    () => import('./routes/resource/behavior/index.tsx'),
+    'BehaviorLearningPage'
+  ),
+})
+
 const knowledgeGraphRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/resource/knowledge-graph',
@@ -162,6 +178,12 @@ const logsRoute = createRoute({
   component: lazyRouteComponent(() => import('./routes/logs'), 'LogViewerPage'),
 })
 
+const reasoningProcessRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: '/reasoning-process',
+  component: lazyRouteComponent(() => import('./routes/logs'), 'ReasoningLogViewerPage'),
+})
+
 // MaiSaka 聊天流监控路由
 const plannerMonitorRoute = createRoute({
   getParentRoute: () => protectedRoute,
@@ -176,11 +198,21 @@ const chatRoute = createRoute({
   component: lazyRouteComponent(() => import('./routes/chat/index'), 'ChatPage'),
 })
 
+// 外部程序嵌入用聊天室路由，不挂载 dashboard 顶栏
+const chatEmbedRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/chat/embed',
+  component: lazyRouteComponent(() => import('./routes/chat/embed'), 'ChatEmbedPage'),
+})
+
 // 插件市场路由
 const pluginsRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/plugins',
-  component: lazyRouteComponent(() => import('./routes/plugins/index'), 'PluginsPage'),
+  component: lazyRouteComponent(
+    () => import('./routes/plugins/PluginMarketplacePage'),
+    'PluginMarketplacePage'
+  ),
 })
 
 // 插件详情路由
@@ -269,16 +301,19 @@ const notFoundRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   authRoute,
   setupRoute,
+  chatEmbedRoute,
   protectedRoute.addChildren([
     indexRoute,
     botConfigRoute,
     modelProviderConfigRoute,
     modelConfigRoute,
     promptManagementRoute,
+    promptGeneratorRoute,
     adapterConfigRoute,
     emojiManagementRoute,
     expressionManagementRoute,
     jargonManagementRoute,
+    behaviorLearningRoute,
     personManagementRoute,
     knowledgeGraphRoute,
     knowledgeBaseRoute,
@@ -289,6 +324,7 @@ const routeTree = rootRoute.addChildren([
     pluginMirrorsRoute,
     mcpSettingsRoute,
     logsRoute,
+    reasoningProcessRoute,
     plannerMonitorRoute,
     chatRoute,
     settingsRoute,
@@ -318,6 +354,11 @@ export const router = createRouter({
   routeTree,
   defaultNotFoundComponent: NotFoundPage,
   defaultErrorComponent: ({ error }) => <RouteErrorBoundary error={error} />,
+  defaultPendingComponent: RoutePendingFallback,
+  defaultPendingMs: 120,
+  defaultPendingMinMs: 120,
+  defaultPreload: 'intent',
+  defaultPreloadDelay: 80,
 })
 
 // 类型声明

@@ -48,8 +48,8 @@ import { useTheme } from '@/components/use-theme'
 
 import { useAnimation } from '@/hooks/use-animation'
 
-import { parseResponse } from '@/lib/api-helpers'
-import { checkAuthStatus } from '@/lib/fetch-with-auth'
+import { checkAuthStatus } from '@/lib/auth'
+import { authApi } from '@/lib/http'
 import { cn } from '@/lib/utils'
 import { APP_FULL_NAME } from '@/lib/version'
 
@@ -143,54 +143,30 @@ export function AuthPage() {
       }
 
       setIsValidating(true)
-      console.log('开始验证 token...')
-
       try {
-        // 向后端发送请求验证 token（后端会设置 HttpOnly Cookie）
-        const response = await fetch('/api/webui/auth/verify', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          credentials: 'include', // 确保接收并存储 Cookie
-          body: JSON.stringify({ token: trimmed }),
-        })
-
-        console.log('Token 验证响应状态:', response.status)
-
-        const result = await parseResponse<{
+        // 向后端发送请求验证 token（后端会设置 HttpOnly Cookie）。
+        // 走 authApi：401（token 错误）透传后端信息，不触发整页跳转。
+        const data = await authApi.post<{
           valid: boolean
           is_first_setup?: boolean
           message?: string
-        }>(response)
-
-        if (!result.success) {
-          console.error('Token 验证失败:', result.error)
-          setError(result.error)
-          return false
-        }
-
-        const data = result.data
-        console.log('Token 验证响应数据:', data)
+        }>('/api/webui/auth/verify', {
+          body: { token: trimmed },
+          errorMessage: t('auth.verifyFailed'),
+        })
 
         if (data.valid) {
-          console.log('Token 验证成功，准备跳转...')
-          console.log('is_first_setup:', data.is_first_setup)
-
           // Token 验证成功，Cookie 已由后端设置
           // 等待一小段时间确保 Cookie 已设置
           await new Promise((resolve) => setTimeout(resolve, 100))
 
           // 再次检查认证状态
-          const authCheck = await checkAuthStatus()
-          console.log('跳转前认证状态检查:', authCheck)
+          await checkAuthStatus()
 
           // 直接使用验证响应中的 is_first_setup 字段，避免额外请求
           if (data.is_first_setup) {
-            console.log('跳转到首次配置页面')
             navigate({ to: '/setup' })
           } else {
-            console.log('跳转到首页')
             navigate({ to: '/' })
           }
           return true

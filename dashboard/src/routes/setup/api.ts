@@ -1,7 +1,7 @@
 // 设置向导API调用函数
 
-import { parseResponse, throwIfError } from '@/lib/api-helpers'
-import { fetchWithAuth, getAuthHeaders } from '@/lib/fetch-with-auth'
+import { backendApi } from '@/lib/http'
+import { PROVIDER_TEMPLATES } from '@/routes/config/providerTemplates'
 
 import type {
   ApiProviderSetupConfig,
@@ -47,19 +47,52 @@ interface ModelConfig {
   model_task_config?: Record<string, TaskConfig>
 }
 
+const DEFAULT_API_PROVIDER_TEMPLATE = PROVIDER_TEMPLATES.find(
+  (template) => template.id === 'deepseek'
+)
+
+function inferThinkingEnabled(modelIdentifier: string): boolean {
+  return modelIdentifier.trim().toLowerCase().includes('deepseek-v4-pro')
+}
+
+function readThinkingEnabled(model?: ModelInfo, fallbackIdentifier = ''): boolean {
+  const thinking = model?.extra_params?.thinking
+  if (typeof thinking === 'object' && thinking !== null && !Array.isArray(thinking)) {
+    return (thinking as Record<string, unknown>).type === 'enabled'
+  }
+
+  const legacyThinking = model?.extra_params?.enable_thinking
+  if (typeof legacyThinking === 'boolean') return legacyThinking
+  if (typeof legacyThinking === 'string') return legacyThinking.toLowerCase() === 'true'
+
+  return inferThinkingEnabled(model?.model_identifier || fallbackIdentifier)
+}
+
+function buildThinkingExtraParams(
+  existingParams: Record<string, unknown> | undefined,
+  thinkingEnabled: boolean
+): Record<string, unknown> {
+  const extraParams = { ...(existingParams || {}) }
+  delete extraParams.enable_thinking
+  extraParams.thinking = { type: thinkingEnabled ? 'enabled' : 'disabled' }
+
+  if (thinkingEnabled) {
+    extraParams.reasoning_effort = 'high'
+  } else {
+    delete extraParams.reasoning_effort
+  }
+
+  return extraParams
+}
+
 // ===== 读取配置 =====
 
 // 读取Bot基础配置
 export async function loadBotBasicConfig(): Promise<BotBasicConfig> {
-  const response = await fetchWithAuth('/api/webui/config/bot', {
-    method: 'GET',
-    headers: getAuthHeaders(),
-  })
-
-  const result = await parseResponse<{ config: { bot?: BotBasicConfig } }>(
-    response
+  const data = await backendApi.get<{ config: { bot?: BotBasicConfig } }>(
+    '/api/webui/config/bot',
+    { errorMessage: '读取 Bot 配置失败' }
   )
-  const data = throwIfError(result)
   const botConfig = (data.config.bot || {}) as Partial<BotBasicConfig>
   const qqAccount = String(botConfig.qq_account ?? '').trim()
 
@@ -74,15 +107,10 @@ export async function loadBotBasicConfig(): Promise<BotBasicConfig> {
 
 // 读取人格配置
 export async function loadPersonalityConfig(): Promise<PersonalityConfig> {
-  const response = await fetchWithAuth('/api/webui/config/bot', {
-    method: 'GET',
-    headers: getAuthHeaders(),
-  })
-
-  const result = await parseResponse<{
-    config: { personality?: PersonalityConfig }
-  }>(response)
-  const data = throwIfError(result)
+  const data = await backendApi.get<{ config: { personality?: PersonalityConfig } }>(
+    '/api/webui/config/bot',
+    { errorMessage: '读取人格配置失败' }
+  )
   const personalityConfig = (data.config.personality || {}) as Partial<PersonalityConfig>
 
   return {
@@ -94,13 +122,9 @@ export async function loadPersonalityConfig(): Promise<PersonalityConfig> {
 }
 
 async function loadModelConfig(): Promise<ModelConfig> {
-  const response = await fetchWithAuth('/api/webui/config/model', {
-    method: 'GET',
-    headers: getAuthHeaders(),
+  const data = await backendApi.get<{ config: ModelConfig }>('/api/webui/config/model', {
+    errorMessage: '读取模型配置失败',
   })
-
-  const result = await parseResponse<{ config: ModelConfig }>(response)
-  const data = throwIfError(result)
   return data.config || {}
 }
 
@@ -121,8 +145,8 @@ export async function loadApiProviderSetupConfig(): Promise<ApiProviderSetupConf
   const provider = modelConfig.api_providers?.find((item) => item.name === providerName)
 
   return {
-    provider_name: providerName,
-    base_url: provider?.base_url || '',
+    provider_name: providerName || DEFAULT_API_PROVIDER_TEMPLATE?.name || '',
+    base_url: provider?.base_url || DEFAULT_API_PROVIDER_TEMPLATE?.base_url || '',
     api_key: '',
   }
 }
@@ -141,9 +165,11 @@ export async function loadModelSetupConfig(): Promise<ModelSetupConfig> {
     planner_model_name: plannerName,
     planner_model_identifier: plannerModel?.model_identifier || plannerName,
     planner_visual: Boolean(plannerModel?.visual),
+    planner_thinking: readThinkingEnabled(plannerModel, plannerName),
     replyer_model_name: replyerName,
     replyer_model_identifier: replyerModel?.model_identifier || replyerName,
     replyer_visual: Boolean(replyerModel?.visual),
+    replyer_thinking: readThinkingEnabled(replyerModel, replyerName),
   }
 }
 
@@ -151,26 +177,18 @@ export async function loadModelSetupConfig(): Promise<ModelSetupConfig> {
 
 // 保存Bot基础配置
 export async function saveBotBasicConfig(config: BotBasicConfig) {
-  const response = await fetchWithAuth('/api/webui/config/bot/section/bot', {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: JSON.stringify(config),
+  return backendApi.post('/api/webui/config/bot/section/bot', {
+    body: config,
+    errorMessage: '保存 Bot 配置失败',
   })
-
-  const result = await parseResponse(response)
-  return throwIfError(result)
 }
 
 // 保存人格配置
 export async function savePersonalityConfig(config: PersonalityConfig) {
-  const response = await fetchWithAuth('/api/webui/config/bot/section/personality', {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: JSON.stringify(config),
+  return backendApi.post('/api/webui/config/bot/section/personality', {
+    body: config,
+    errorMessage: '保存人格配置失败',
   })
-
-  const result = await parseResponse(response)
-  return throwIfError(result)
 }
 
 function createBasicModel(
@@ -178,6 +196,7 @@ function createBasicModel(
   modelIdentifier: string,
   providerName: string,
   visual: boolean,
+  thinking: boolean,
   existing?: ModelInfo
 ): ModelInfo {
   return {
@@ -186,8 +205,8 @@ function createBasicModel(
     cache_price_in: 0,
     price_out: 0,
     force_stream_mode: false,
-    extra_params: {},
     ...existing,
+    extra_params: buildThinkingExtraParams(existing?.extra_params, thinking),
     visual,
     model_identifier: modelIdentifier,
     name: modelName,
@@ -234,14 +253,10 @@ export async function saveApiProviderSetupConfig(config: ApiProviderSetupConfig)
     api_providers: apiProviders,
   }
 
-  const saveResponse = await fetchWithAuth('/api/webui/config/model', {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: JSON.stringify(updatedConfig),
+  return backendApi.post('/api/webui/config/model', {
+    body: updatedConfig,
+    errorMessage: '保存 API 提供商配置失败',
   })
-
-  const saveResult = await parseResponse(saveResponse)
-  return throwIfError(saveResult)
 }
 
 // 保存基础模型配置
@@ -267,6 +282,7 @@ export async function saveModelSetupConfig(
       plannerModelIdentifier,
       trimmedProviderName,
       config.planner_visual,
+      config.planner_thinking,
       existingPlannerModel
     )
   )
@@ -277,6 +293,7 @@ export async function saveModelSetupConfig(
       replyerModelIdentifier,
       trimmedProviderName,
       config.replyer_visual,
+      config.replyer_thinking,
       existingReplyerModel
     )
   )
@@ -305,22 +322,15 @@ export async function saveModelSetupConfig(
     model_task_config: updatedTaskConfig,
   }
 
-  const saveResponse = await fetchWithAuth('/api/webui/config/model', {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: JSON.stringify(updatedConfig),
+  return backendApi.post('/api/webui/config/model', {
+    body: updatedConfig,
+    errorMessage: '保存模型配置失败',
   })
-
-  const saveResult = await parseResponse(saveResponse)
-  return throwIfError(saveResult)
 }
 
 // 标记设置完成
 export async function completeSetup() {
-  const response = await fetchWithAuth('/api/webui/setup/complete', {
-    method: 'POST',
+  return backendApi.post('/api/webui/setup/complete', {
+    errorMessage: '标记设置完成失败',
   })
-
-  const result = await parseResponse(response)
-  return throwIfError(result)
 }

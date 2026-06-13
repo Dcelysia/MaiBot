@@ -23,6 +23,7 @@ from src.common.data_models.llm_service_data_models import (
     PromptMessage,
 )
 from src.common.logger import get_logger
+from src.common.utils.utils_image import ImageUtils
 from src.llm_models.model_client.base_client import BaseClient
 from src.llm_models.payload_content.message import Message, MessageBuilder, RoleType
 from src.llm_models.payload_content.tool_option import ToolCall
@@ -177,6 +178,7 @@ class LLMServiceClient:
             prompt=prompt,
             temperature=active_options.temperature,
             max_tokens=active_options.max_tokens,
+            model_name=active_options.model_name,
             tools=active_options.tool_options,
             response_format=active_options.response_format,
             raise_when_empty=active_options.raise_when_empty,
@@ -202,11 +204,15 @@ class LLMServiceClient:
         active_options = self._normalize_generation_options(options)
         prompt_text_holder: dict[str, str] = {}
 
-        def cache_stats_message_factory(client: BaseClient, model_info: Any = None) -> List[Message]:
+        async def cache_stats_message_factory(client: BaseClient, model_info: Any = None) -> List[Message]:
             if len(inspect.signature(message_factory).parameters) >= 2:
-                messages = message_factory(client, model_info)
+                message_result = message_factory(client, model_info)
             else:
-                messages = message_factory(client)
+                message_result = message_factory(client)
+            if inspect.isawaitable(message_result):
+                messages = await message_result
+            else:
+                messages = message_result
             prompt_text_holder["prompt_text"] = self._build_cache_stats_prompt_text(
                 messages=messages,
                 tool_options=active_options.tool_options,
@@ -218,6 +224,7 @@ class LLMServiceClient:
             message_factory=cache_stats_message_factory,
             temperature=active_options.temperature,
             max_tokens=active_options.max_tokens,
+            model_name=active_options.model_name,
             tools=active_options.tool_options,
             response_format=active_options.response_format,
             raise_when_empty=active_options.raise_when_empty,
@@ -245,6 +252,18 @@ class LLMServiceClient:
             LLMResponseResult: 统一文本生成结果。
         """
         active_options = self._normalize_image_options(options)
+        original_image_base64_size = len(image_base64)
+        image_base64, image_format, resized_for_model = ImageUtils.normalize_image_base64_for_model(
+            image_base64,
+            image_format,
+        )
+        if resized_for_model:
+            logger.info(
+                "图片尺寸低于视觉模型常见最小识别限制，已使用最近邻整数放大后再请求模型: "
+                f"request_type={self.request_type}, "
+                f"original_base64_size={original_image_base64_size}, normalized_base64_size={len(image_base64)}"
+            )
+
         image_digest = hashlib.sha256(image_base64.encode("utf-8")).hexdigest() if image_base64 else ""
         prompt_text = json.dumps(
             {
@@ -621,6 +640,7 @@ async def generate(request: LLMServiceRequest) -> LLMServiceResult:
             options=LLMGenerationOptions(
                 temperature=request.temperature,
                 max_tokens=request.max_tokens,
+                model_name=request.model_name,
                 tool_options=request.tool_options,
                 response_format=request.response_format,
                 interrupt_flag=request.interrupt_flag,

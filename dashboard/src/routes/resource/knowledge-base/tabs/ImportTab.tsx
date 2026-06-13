@@ -1,6 +1,7 @@
+import { useMemo, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 
-import { ChevronLeft, ChevronRight, Loader2, RefreshCw, Upload } from 'lucide-react'
+import { Check, ChevronLeft, ChevronRight, Loader2, RefreshCw, Search, SlidersHorizontal, Upload } from 'lucide-react'
 
 import { MemoryMiniTabs } from '@/components/memory/MemoryMiniTabs'
 import { MemoryProgressIndicator } from '@/components/memory/MemoryProgressIndicator'
@@ -17,9 +18,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tabs, TabsContent } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
+import { ThinkingIllustration } from '@/components/ui/thinking-illustration'
 import { cn } from '@/lib/utils'
 import type {
   MemoryImportChunkPayload,
+  MemoryImportChatTargetPayload,
   MemoryImportFilePayload,
   MemoryImportInputMode,
   MemoryImportRetrySummary,
@@ -39,6 +42,83 @@ import {
   normalizeProgress,
 } from '../utils'
 
+function formatChunkSummary(done: unknown, total: unknown, failed: unknown, cancelled: unknown = 0): string {
+  const doneCount = Number(done ?? 0)
+  const totalCount = Number(total ?? 0)
+  const failedCount = Number(failed ?? 0)
+  const cancelledCount = Number(cancelled ?? 0)
+  const parts = [`成功 ${doneCount} / ${totalCount} 分块`]
+  if (failedCount > 0) {
+    parts.push(`失败 ${failedCount}`)
+  }
+  if (cancelledCount > 0) {
+    parts.push(`取消 ${cancelledCount}`)
+  }
+  return parts.join(' · ')
+}
+
+function compactTextParts(parts: Array<string | null | undefined>): string[] {
+  return parts.map((part) => String(part ?? '').trim()).filter(Boolean)
+}
+
+function getUserIdLabel(chat: MemoryImportChatTargetPayload): string {
+  const userId = String(chat.user_id ?? '').trim()
+  if (!userId) {
+    return ''
+  }
+
+  const platform = String(chat.platform ?? '').trim().toLowerCase()
+  if (platform === 'qq') {
+    return `QQ ${userId}`
+  }
+  if (platform === 'wechat' || platform === 'wx') {
+    return `微信 ${userId}`
+  }
+  return `用户 ID ${userId}`
+}
+
+function getChatTargetMetaParts(chat: MemoryImportChatTargetPayload): string[] {
+  return compactTextParts([
+    chat.platform || '未知平台',
+    chat.is_group ? '群聊' : '私聊',
+    chat.group_id ? `群号 ${chat.group_id}` : '',
+    getUserIdLabel(chat),
+  ])
+}
+
+function getChatTargetSearchText(chat: MemoryImportChatTargetPayload): string {
+  return compactTextParts([
+    chat.chat_name,
+    chat.platform,
+    chat.group_id,
+    chat.user_id,
+    chat.account_id,
+    chat.scope,
+    chat.chat_id,
+  ])
+    .join(' ')
+    .toLowerCase()
+}
+
+function getChatTargetValueLabel(chat: MemoryImportChatTargetPayload | undefined): string {
+  if (!chat) {
+    return '不绑定聊天流'
+  }
+  const idLabel = chat.group_id || chat.user_id
+  return idLabel ? `${chat.chat_name} · ${idLabel}` : chat.chat_name
+}
+
+function filterChatTargets(
+  targets: MemoryImportChatTargetPayload[],
+  query: string,
+): MemoryImportChatTargetPayload[] {
+  const normalizedQuery = query.trim().toLowerCase()
+  if (!normalizedQuery) {
+    return targets.slice(0, 8)
+  }
+  return targets.filter((chat) => getChatTargetSearchText(chat).includes(normalizedQuery)).slice(0, 12)
+}
+
 export interface ImportTabProps {
   importCreateMode: MemoryImportTaskKind
   setImportCreateMode: Dispatch<SetStateAction<MemoryImportTaskKind>>
@@ -47,10 +127,19 @@ export interface ImportTabProps {
   setImportCommonFileConcurrency: Dispatch<SetStateAction<string>>
   importCommonChunkConcurrency: string
   setImportCommonChunkConcurrency: Dispatch<SetStateAction<string>>
+  importCommonNarrativeWindowSize: string
+  setImportCommonNarrativeWindowSize: Dispatch<SetStateAction<string>>
+  importCommonNarrativeOverlap: string
+  setImportCommonNarrativeOverlap: Dispatch<SetStateAction<string>>
+  importCommonFactualTargetSize: string
+  setImportCommonFactualTargetSize: Dispatch<SetStateAction<string>>
   importCommonLlmEnabled: boolean
   setImportCommonLlmEnabled: Dispatch<SetStateAction<boolean>>
   importCommonChatLog: boolean
   setImportCommonChatLog: Dispatch<SetStateAction<boolean>>
+  importCommonChatId: string
+  setImportCommonChatId: Dispatch<SetStateAction<string>>
+  importChatTargets: MemoryImportChatTargetPayload[]
   importCommonStrategyOverride: string
   setImportCommonStrategyOverride: Dispatch<SetStateAction<string>>
   importCommonDedupePolicy: string
@@ -201,10 +290,19 @@ export function ImportTab(props: ImportTabProps) {
     setImportCommonFileConcurrency,
     importCommonChunkConcurrency,
     setImportCommonChunkConcurrency,
+    importCommonNarrativeWindowSize,
+    setImportCommonNarrativeWindowSize,
+    importCommonNarrativeOverlap,
+    setImportCommonNarrativeOverlap,
+    importCommonFactualTargetSize,
+    setImportCommonFactualTargetSize,
     importCommonLlmEnabled,
     setImportCommonLlmEnabled,
     importCommonChatLog,
     setImportCommonChatLog,
+    importCommonChatId,
+    setImportCommonChatId,
+    importChatTargets,
     importCommonStrategyOverride,
     setImportCommonStrategyOverride,
     importCommonDedupePolicy,
@@ -332,6 +430,23 @@ export function ImportTab(props: ImportTabProps) {
     importChunksLoading,
     selectedImportChunks,
   } = props
+  const [chatTargetQuery, setChatTargetQuery] = useState('')
+  const selectedImportChatTarget = useMemo(
+    () => importChatTargets.find((chat) => chat.chat_id === importCommonChatId.trim()),
+    [importChatTargets, importCommonChatId],
+  )
+  const visibleImportChatTargets = useMemo(
+    () => filterChatTargets(importChatTargets, chatTargetQuery),
+    [chatTargetQuery, importChatTargets],
+  )
+  const importMaxChunkChars = Number.isFinite(Number(importSettings.max_chunk_chars))
+    ? Number(importSettings.max_chunk_chars)
+    : 3200
+  const narrativeWindowForOverlap = Number.isFinite(
+    Number(importCommonNarrativeWindowSize || importSettings.default_narrative_window_size),
+  )
+    ? Number(importCommonNarrativeWindowSize || importSettings.default_narrative_window_size)
+    : 1600
 
   return (
     <TabsContent
@@ -359,15 +474,17 @@ export function ImportTab(props: ImportTabProps) {
                   <MemoryMiniTabs items={IMPORT_KIND_OPTIONS} />
                 </div>
 
-                <div className="space-y-4 rounded-lg border bg-muted/30 p-4">
-                <div className="space-y-1">
-                  <div className="text-sm font-medium">公共参数</div>
-                  <div className="text-xs text-muted-foreground">这些设置会应用到当前导入任务。一般保持默认即可，只在批量导入或排查问题时调整。</div>
+                <div className="space-y-4 rounded-lg border bg-muted/20 p-4">
+                <div className="rounded-md border border-border/60 bg-background/80 px-3 py-2">
+                  <div className="text-sm font-medium text-foreground">公共参数</div>
+                  <div className="mt-0.5 text-xs leading-relaxed text-foreground/75">这些设置会应用到当前导入任务。一般保持默认即可，只在批量导入或排查问题时调整。</div>
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
-                  <div className="space-y-1">
-                    <Label>文件并发数</Label>
-                    <div className="text-xs text-muted-foreground">同时处理多少个文件；文件很多时再适当调高。</div>
+                  <div className="grid gap-2 rounded-md border bg-background/70 p-3 sm:grid-cols-[minmax(0,1fr)_8rem] sm:items-center">
+                    <div className="min-w-0">
+                      <Label>文件并发数</Label>
+                      <div className="mt-0.5 text-xs text-muted-foreground">同时处理多少个文件；文件很多时再适当调高。</div>
+                    </div>
                     <Input
                       type="number"
                       min={1}
@@ -376,9 +493,11 @@ export function ImportTab(props: ImportTabProps) {
                       onChange={(event) => setImportCommonFileConcurrency(event.target.value)}
                     />
                   </div>
-                  <div className="space-y-1">
-                    <Label>分块并发数</Label>
-                    <div className="text-xs text-muted-foreground">单个文件内并行处理多少个分块；过高会增加资源占用。</div>
+                  <div className="grid gap-2 rounded-md border bg-background/70 p-3 sm:grid-cols-[minmax(0,1fr)_8rem] sm:items-center">
+                    <div className="min-w-0">
+                      <Label>分块并发数</Label>
+                      <div className="mt-0.5 text-xs text-muted-foreground">单个文件内并行处理多少个分块；过高会增加资源占用。</div>
+                    </div>
                     <Input
                       type="number"
                       min={1}
@@ -387,25 +506,89 @@ export function ImportTab(props: ImportTabProps) {
                       onChange={(event) => setImportCommonChunkConcurrency(event.target.value)}
                     />
                   </div>
-                  <div className="rounded-md border bg-background/70 p-3">
-                    <div className="flex items-center gap-2 text-sm">
+                  <div className="rounded-md border bg-background/70 px-2.5 py-2">
+                    <div className="flex items-center gap-2 text-sm font-medium leading-tight">
                       <Checkbox
                         checked={importCommonLlmEnabled}
                         onCheckedChange={(value) => setImportCommonLlmEnabled(Boolean(value))}
                       />
                       启用 LLM 抽取
                     </div>
-                    <div className="mt-1 text-xs text-muted-foreground">需要模型参与抽取，质量更高但耗时更长。</div>
+                    <div className="mt-0.5 pl-6 text-[11px] leading-snug text-muted-foreground">需要模型参与抽取，质量更高但耗时更长。</div>
                   </div>
-                  <div className="rounded-md border bg-background/70 p-3">
-                    <div className="flex items-center gap-2 text-sm">
+                  <div className="rounded-md border bg-background/70 px-2.5 py-2">
+                    <div className="flex items-center gap-2 text-sm font-medium leading-tight">
                       <Checkbox
                         checked={importCommonChatLog}
                         onCheckedChange={(value) => setImportCommonChatLog(Boolean(value))}
                       />
                       按聊天日志解析
                     </div>
-                    <div className="mt-1 text-xs text-muted-foreground">适合导入聊天记录，会尽量保留时间和对话上下文。</div>
+                    <div className="mt-0.5 pl-6 text-[11px] leading-snug text-muted-foreground">适合导入聊天记录，会尽量保留时间和对话上下文。</div>
+                  </div>
+                  <div className="grid gap-3 rounded-md border bg-background/70 p-3 md:col-span-2 md:grid-cols-[minmax(0,1fr)_minmax(18rem,28rem)]">
+                    <div className="min-w-0">
+                      <Label>归属聊天流</Label>
+                      <div className="mt-0.5 text-xs text-muted-foreground">可输入群号、QQ 号或聊天名检索；选择后，这批记忆只会在对应聊天流的检索中默认出现。</div>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="relative">
+                        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                        <Input
+                          aria-label="搜索归属聊天流"
+                          value={chatTargetQuery}
+                          onChange={(event) => setChatTargetQuery(event.target.value)}
+                          placeholder="输入群号、QQ 号或聊天名"
+                          className="pl-9"
+                        />
+                      </div>
+                      <div className="rounded-md border bg-background">
+                        <button
+                          type="button"
+                          className={cn(
+                            'flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent',
+                            !importCommonChatId && 'bg-accent/70',
+                          )}
+                          onClick={() => setImportCommonChatId('')}
+                        >
+                          <Check className={cn('h-4 w-4 shrink-0', !importCommonChatId ? 'opacity-100' : 'opacity-0')} />
+                          <span className="truncate">不绑定聊天流</span>
+                        </button>
+                        {visibleImportChatTargets.length > 0 ? (
+                          <div className="max-h-44 overflow-y-auto border-t">
+                            {visibleImportChatTargets.map((chat) => (
+                              <button
+                                key={chat.chat_id}
+                                type="button"
+                                className={cn(
+                                  'flex w-full items-start gap-2 px-3 py-2 text-left text-sm hover:bg-accent',
+                                  importCommonChatId.trim() === chat.chat_id && 'bg-accent/70',
+                                )}
+                                onClick={() => setImportCommonChatId(chat.chat_id)}
+                              >
+                                <Check
+                                  className={cn(
+                                    'mt-0.5 h-4 w-4 shrink-0',
+                                    importCommonChatId.trim() === chat.chat_id ? 'opacity-100' : 'opacity-0',
+                                  )}
+                                />
+                                <span className="min-w-0 flex-1">
+                                  <span className="block truncate font-medium">{chat.chat_name}</span>
+                                  <span className="block truncate text-[11px] text-muted-foreground">
+                                    {getChatTargetMetaParts(chat).join(' · ')}
+                                  </span>
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="border-t px-3 py-3 text-sm text-muted-foreground">没有找到匹配的聊天流</div>
+                        )}
+                      </div>
+                      <div className="truncate text-[11px] leading-snug text-muted-foreground">
+                        当前选择：{getChatTargetValueLabel(selectedImportChatTarget)}
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -414,6 +597,47 @@ export function ImportTab(props: ImportTabProps) {
                     高级参数（通常不用修改）
                   </summary>
                   <div className="mt-3 grid gap-3">
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <div className="space-y-1">
+                        <Label>叙事抽取窗口</Label>
+                        <Input
+                          type="number"
+                          min={200}
+                          max={importMaxChunkChars}
+                          value={importCommonNarrativeWindowSize}
+                          onChange={(event) => setImportCommonNarrativeWindowSize(event.target.value)}
+                        />
+                        <div className="text-[11px] leading-snug text-muted-foreground">
+                          默认 {Number(importSettings.default_narrative_window_size ?? 1600)}，用于 narrative/聊天日志。
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <Label>叙事重叠字符</Label>
+                        <Input
+                          type="number"
+                          min={0}
+                          max={Math.max(0, narrativeWindowForOverlap - 1)}
+                          value={importCommonNarrativeOverlap}
+                          onChange={(event) => setImportCommonNarrativeOverlap(event.target.value)}
+                        />
+                        <div className="text-[11px] leading-snug text-muted-foreground">
+                          默认 {Number(importSettings.default_narrative_overlap ?? 400)}，保留跨块上下文。
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <Label>事实分块目标</Label>
+                        <Input
+                          type="number"
+                          min={200}
+                          max={importMaxChunkChars}
+                          value={importCommonFactualTargetSize}
+                          onChange={(event) => setImportCommonFactualTargetSize(event.target.value)}
+                        />
+                        <div className="text-[11px] leading-snug text-muted-foreground">
+                          默认 {Number(importSettings.default_factual_target_size ?? 1200)}，用于 factual 结构感知切分。
+                        </div>
+                      </div>
+                    </div>
                     <div className="space-y-1">
                       <Label>指定抽取策略</Label>
                       <Input
@@ -434,6 +658,15 @@ export function ImportTab(props: ImportTabProps) {
                         value={importCommonChatReferenceTime}
                         onChange={(event) => setImportCommonChatReferenceTime(event.target.value)}
                       />
+                    </div>
+                    <div className="space-y-1">
+                      <Label>聊天流 ID</Label>
+                      <Input
+                        value={importCommonChatId}
+                        onChange={(event) => setImportCommonChatId(event.target.value)}
+                        placeholder="留空表示不绑定"
+                      />
+                      <div className="text-[11px] leading-snug text-muted-foreground">仅填写已存在的真实聊天流 ID；上方下拉无法覆盖时再手动填写。</div>
                     </div>
                     <div className="flex items-center gap-2 text-sm">
                       <Checkbox
@@ -666,74 +899,141 @@ export function ImportTab(props: ImportTabProps) {
                   <div className="text-xs text-muted-foreground">迁移 MaiBot 历史长期记忆</div>
                   <div className="grid gap-3">
                     <div className="space-y-1">
-                      <Label>源数据库路径</Label>
-                      <Input value={maibotSourceDb} onChange={(event) => setMaibotSourceDb(event.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <Label>起始时间</Label>
-                      <Input value={maibotTimeFrom} onChange={(event) => setMaibotTimeFrom(event.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <Label>结束时间</Label>
-                      <Input value={maibotTimeTo} onChange={(event) => setMaibotTimeTo(event.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <Label>起始 ID</Label>
-                      <Input type="number" min={1} value={maibotStartId} onChange={(event) => setMaibotStartId(event.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <Label>结束 ID</Label>
-                      <Input type="number" min={1} value={maibotEndId} onChange={(event) => setMaibotEndId(event.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <Label>会话 ID 列表</Label>
-                      <Input value={maibotStreamIds} onChange={(event) => setMaibotStreamIds(event.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <Label>群组 ID 列表</Label>
-                      <Input value={maibotGroupIds} onChange={(event) => setMaibotGroupIds(event.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <Label>用户 ID 列表</Label>
-                      <Input value={maibotUserIds} onChange={(event) => setMaibotUserIds(event.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <Label>读取批大小</Label>
+                      <Label htmlFor="maibot-source-db">源数据库路径</Label>
                       <Input
-                        type="number"
-                        min={1}
-                        value={maibotReadBatchSize}
-                        onChange={(event) => setMaibotReadBatchSize(event.target.value)}
+                        id="maibot-source-db"
+                        required
+                        value={maibotSourceDb}
+                        onChange={(event) => setMaibotSourceDb(event.target.value)}
+                        placeholder="data/MaiBot.db"
+                      />
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="space-y-1">
+                        <Label htmlFor="maibot-time-from">起始时间</Label>
+                        <Input
+                          id="maibot-time-from"
+                          type="datetime-local"
+                          step={1}
+                          max={maibotTimeTo || undefined}
+                          value={maibotTimeFrom}
+                          onChange={(event) => setMaibotTimeFrom(event.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="maibot-time-to">结束时间</Label>
+                        <Input
+                          id="maibot-time-to"
+                          type="datetime-local"
+                          step={1}
+                          min={maibotTimeFrom || undefined}
+                          value={maibotTimeTo}
+                          onChange={(event) => setMaibotTimeTo(event.target.value)}
+                        />
+                      </div>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="space-y-1">
+                        <Label htmlFor="maibot-start-id">起始 ID</Label>
+                        <Input
+                          id="maibot-start-id"
+                          type="number"
+                          min={1}
+                          max={maibotEndId || undefined}
+                          step={1}
+                          value={maibotStartId}
+                          onChange={(event) => setMaibotStartId(event.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="maibot-end-id">结束 ID</Label>
+                        <Input
+                          id="maibot-end-id"
+                          type="number"
+                          min={maibotStartId || 1}
+                          step={1}
+                          value={maibotEndId}
+                          onChange={(event) => setMaibotEndId(event.target.value)}
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="maibot-stream-ids">会话 ID 列表</Label>
+                      <Input
+                        id="maibot-stream-ids"
+                        value={maibotStreamIds}
+                        onChange={(event) => setMaibotStreamIds(event.target.value)}
                       />
                     </div>
                     <div className="space-y-1">
-                      <Label>提交窗口行数</Label>
+                      <Label htmlFor="maibot-group-ids">群组 ID 列表</Label>
                       <Input
-                        type="number"
-                        min={1}
-                        value={maibotCommitWindowRows}
-                        onChange={(event) => setMaibotCommitWindowRows(event.target.value)}
+                        id="maibot-group-ids"
+                        value={maibotGroupIds}
+                        onChange={(event) => setMaibotGroupIds(event.target.value)}
                       />
                     </div>
                     <div className="space-y-1">
-                      <Label>向量线程数</Label>
+                      <Label htmlFor="maibot-user-ids">用户 ID 列表</Label>
                       <Input
-                        type="number"
-                        min={1}
-                        value={maibotEmbedWorkers}
-                        onChange={(event) => setMaibotEmbedWorkers(event.target.value)}
+                        id="maibot-user-ids"
+                        value={maibotUserIds}
+                        onChange={(event) => setMaibotUserIds(event.target.value)}
                       />
                     </div>
                   </div>
+                  <details className="rounded-md border bg-background/70 p-3 text-sm">
+                    <summary className="flex cursor-pointer items-center gap-2 text-sm font-medium">
+                      <SlidersHorizontal className="h-4 w-4" />
+                      高级选项
+                    </summary>
+                    <div className="mt-3 grid gap-3">
+                      <div className="space-y-1">
+                        <Label htmlFor="maibot-read-batch-size">读取批大小</Label>
+                        <Input
+                          id="maibot-read-batch-size"
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={maibotReadBatchSize}
+                          onChange={(event) => setMaibotReadBatchSize(event.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="maibot-commit-window-rows">提交窗口行数</Label>
+                        <Input
+                          id="maibot-commit-window-rows"
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={maibotCommitWindowRows}
+                          onChange={(event) => setMaibotCommitWindowRows(event.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="maibot-embed-workers">向量线程数</Label>
+                        <Input
+                          id="maibot-embed-workers"
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={maibotEmbedWorkers}
+                          onChange={(event) => setMaibotEmbedWorkers(event.target.value)}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <div className="flex items-center gap-2 text-sm">
+                          <Checkbox checked={maibotNoResume} onCheckedChange={(value) => setMaibotNoResume(Boolean(value))} />
+                          从头开始，不继续上次进度
+                        </div>
+                        <div className="flex items-center gap-2 text-sm">
+                          <Checkbox checked={maibotResetState} onCheckedChange={(value) => setMaibotResetState(Boolean(value))} />
+                          重置迁移状态
+                        </div>
+                      </div>
+                    </div>
+                  </details>
                   <div className="grid gap-2">
-                    <div className="flex items-center gap-2 text-sm">
-                      <Checkbox checked={maibotNoResume} onCheckedChange={(value) => setMaibotNoResume(Boolean(value))} />
-                      从头开始，不继续上次进度
-                    </div>
-                    <div className="flex items-center gap-2 text-sm">
-                      <Checkbox checked={maibotResetState} onCheckedChange={(value) => setMaibotResetState(Boolean(value))} />
-                      重置迁移状态
-                    </div>
                     <div className="flex items-center gap-2 text-sm">
                       <Checkbox checked={maibotDryRun} onCheckedChange={(value) => setMaibotDryRun(Boolean(value))} />
                       只预演，不写入数据
@@ -1012,9 +1312,8 @@ export function ImportTab(props: ImportTabProps) {
           </CardHeader>
           <CardContent className="space-y-6">
             {selectedImportTaskLoading ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                正在加载任务详情...
+              <div className="flex items-center gap-2">
+                <ThinkingIllustration size="sm" />
               </div>
             ) : null}
 
@@ -1073,12 +1372,19 @@ export function ImportTab(props: ImportTabProps) {
                                   ? 'success'
                                   : String(selectedImportTaskResolved.status ?? '') === 'failed'
                                     ? 'destructive'
-                                    : String(selectedImportTaskResolved.status ?? '') === 'cancelled'
+                                    : String(selectedImportTaskResolved.status ?? '') === 'completed_with_errors'
+                                      ? 'warning'
+                                      : String(selectedImportTaskResolved.status ?? '') === 'cancelled'
                                       ? 'muted'
                                       : 'default'
                               }
                               busy={RUNNING_IMPORT_STATUS.has(String(selectedImportTaskResolved.status ?? ''))}
-                              detail={`已完成 ${Number(selectedImportTaskResolved.done_chunks ?? 0)} / ${Number(selectedImportTaskResolved.total_chunks ?? 0)} 分块`}
+                              detail={formatChunkSummary(
+                                selectedImportTaskResolved.done_chunks,
+                                selectedImportTaskResolved.total_chunks,
+                                selectedImportTaskResolved.failed_chunks,
+                                selectedImportTaskResolved.cancelled_chunks,
+                              )}
                             />
                           </TableCell>
                         </TableRow>
@@ -1160,7 +1466,12 @@ export function ImportTab(props: ImportTabProps) {
                               </div>
                               <Progress value={normalizeProgress(file.progress)} className="mt-2 h-1.5" />
                               <div className="mt-2 text-xs text-muted-foreground">
-                                {formatProgressPercent(file.progress)} · {Number(file.done_chunks ?? 0)} / {Number(file.total_chunks ?? 0)}
+                                {formatProgressPercent(file.progress)} · {formatChunkSummary(
+                                  file.done_chunks,
+                                  file.total_chunks,
+                                  file.failed_chunks,
+                                  file.cancelled_chunks,
+                                )}
                               </div>
                               {file.error ? (
                                 <div className="mt-2 truncate text-xs text-destructive">{file.error}</div>
@@ -1222,7 +1533,7 @@ export function ImportTab(props: ImportTabProps) {
                         {importChunksLoading ? (
                           <TableRow>
                             <TableCell colSpan={5} className="text-center text-muted-foreground">
-                              正在加载分块详情...
+                              <ThinkingIllustration size="sm" className="mx-auto" />
                             </TableCell>
                           </TableRow>
                         ) : selectedImportChunks.length > 0 ? (

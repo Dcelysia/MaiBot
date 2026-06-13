@@ -12,6 +12,7 @@ NapCat.Framework.Windows.OneKey/
 log/
 logs/
 out/
+SnowLuma-v1.6.10-win-x64/
 tool_call_benchmark.py
 run_maibot_core.bat
 run_voice.bat
@@ -27,7 +28,6 @@ nonebot-maibot-adapter/
 MaiMBot-LPMM
 *.zip
 run_bot.bat
-run_na.bat
 run_all_in_wt.bat
 run.bat
 log_debug/
@@ -35,11 +35,8 @@ NapCat.Shell.Windows.OneKey
 run_amds.bat
 run_none.bat
 docs-mai/
+plugin_repo/
 run.py
-message_queue_content.txt
-message_queue_content.bat
-message_queue_window.bat
-message_queue_window.txt
 queue_update.txt
 start_saka.bat
 .env
@@ -49,8 +46,6 @@ start_all.bat
 config/bot_config_dev.toml
 config/bot_config.toml
 config/bot_config.toml.bak
-config/lpmm_config.toml
-config/lpmm_config.toml.bak
 template/compare/bot_config_template.toml
 template/compare/model_config_template.toml
 # CLAUDE.md
@@ -67,6 +62,9 @@ node_modules/
 dist/
 dist-ssr/
 *.local
+
+# Custom MaiBot config for Docker Deployments
+docker-config/
 
 # Editor directories and files
 .vscode/*
@@ -104,6 +102,12 @@ parts/
 sdist/
 var/
 wheels/
+
+# Dev container config
+.devcontainer/devcontainer-lock.json
+# DooD 自动生成的 compose override，包含宿主机绝对路径，不可提交；仅在 devcontainer 内通过 COMPOSE_FILE 加载
+docker-compose.devcontainer.yml
+
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -212,7 +216,7 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.venv
+.venv/
 env/
 venv/
 ENV/

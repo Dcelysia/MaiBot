@@ -12,6 +12,7 @@ from rich.traceback import install
 
 from src.common.database.database_model import Images, ImageType
 from src.common.logger import get_logger
+from src.common.utils.image_path import resolve_stored_image_path, serialize_stored_image_path
 
 from . import BaseDatabaseDataModel
 
@@ -25,10 +26,10 @@ class BaseImageDataModel(BaseDatabaseDataModel[Images]):
     def __init__(self, full_path: str | Path, image_bytes: Optional[bytes] = None):
         if not full_path:
             raise ValueError("图片路径不能为空")
-        if Path(full_path).is_dir() or not Path(full_path).exists():
+        resolved_path = Path(full_path).absolute().resolve()
+        if resolved_path.is_dir() or not resolved_path.exists():
             raise FileNotFoundError(f"图片路径无效: {full_path}")
 
-        resolved_path = Path(full_path).absolute().resolve()
         self.full_path: Path
         self.dir_path: Path
         self.file_name: str
@@ -71,7 +72,7 @@ class BaseImageDataModel(BaseDatabaseDataModel[Images]):
             existing_file_hash = hashlib.sha256(self.read_image_bytes(new_full_path)).hexdigest()
             if existing_file_hash == self.file_hash:
                 logger.info(f"[初始化] {new_full_path.name} 已存在且内容一致，复用已有文件")
-                self.full_path.unlink()
+                self.full_path.unlink(missing_ok=True)
                 self._set_full_path(new_full_path)
                 return
 
@@ -150,9 +151,11 @@ class BaseImageDataModel(BaseDatabaseDataModel[Images]):
 
             file_ext = self.file_name.split(".")[-1].lower()
             if file_ext != self.image_format:
-                logger.warning(
-                    f"[初始化] {self.file_name} 文件扩展名与实际格式不符: ext`{file_ext}`!=`{self.image_format}`"
-                )
+                log_message = f"[初始化] {self.file_name} 文件扩展名与实际格式不符: ext`{file_ext}`!=`{self.image_format}`"
+                if file_ext == "tmp":
+                    logger.debug(log_message)
+                else:
+                    logger.warning(log_message)
                 self._rename_file_to_match_format()
 
             return True
@@ -179,7 +182,7 @@ class MaiEmoji(BaseImageDataModel):
         if db_record.no_file_flag:
             raise ValueError(f"数据库记录 {db_record.image_hash} 标记为文件不存在，无法创建 MaiEmoji 对象")
 
-        obj = cls(db_record.full_path)
+        obj = cls(resolve_stored_image_path(db_record.full_path))
         obj.file_hash = db_record.image_hash
         obj._restore_image_format_from_path()
 
@@ -205,7 +208,7 @@ class MaiEmoji(BaseImageDataModel):
         return Images(
             image_hash=self.file_hash,
             description=self.description,
-            full_path=str(self.full_path),
+            full_path=serialize_stored_image_path(self.full_path),
             image_type=ImageType.EMOJI,
             query_count=self.query_count,
             last_used_time=self.last_used_time,
@@ -227,9 +230,8 @@ class MaiImage(BaseImageDataModel):
         if db_record.no_file_flag:
             raise ValueError(f"数据库记录 {db_record.image_hash} 标记为文件不存在，无法创建 MaiImage 对象")
 
-        obj = cls(db_record.full_path)
+        obj = cls(resolve_stored_image_path(db_record.full_path))
         obj.file_hash = db_record.image_hash
-        obj._set_full_path(Path(db_record.full_path))
         obj._restore_image_format_from_path()
         obj.description = db_record.description
         obj.vlm_processed = db_record.vlm_processed
@@ -239,7 +241,7 @@ class MaiImage(BaseImageDataModel):
         return Images(
             image_hash=self.file_hash,
             description=self.description,
-            full_path=str(self.full_path),
+            full_path=serialize_stored_image_path(self.full_path),
             image_type=ImageType.IMAGE,
             vlm_processed=self.vlm_processed,
         )

@@ -374,7 +374,7 @@ class TaskConfig(ConfigBase):
     """使用的模型列表, 每个元素对应上面的模型名称(name)"""
 
     max_tokens: int = Field(
-        default=1024,
+        default=4096,
         ge=1,
         json_schema_extra={
             "x-widget": "input",
@@ -406,7 +406,7 @@ class TaskConfig(ConfigBase):
             "advanced": True,
         },
     )
-    """慢请求阈值（秒），超过此值会输出警告日志"""
+    """超时警告时间（秒），超过此时间会输出警告日志"""
 
     selection_strategy: str = Field(
         default="balance",
@@ -417,6 +417,31 @@ class TaskConfig(ConfigBase):
         },
     )
     """模型选择策略：balance（负载均衡）、random（随机选择）或 sequential（按配置顺序优先选择）"""
+
+    hard_timeout: float = Field(
+        default=240.0,
+        ge=1.0,
+        json_schema_extra={
+            "x-widget": "input",
+            "x-icon": "clock",
+            "step": 1.0,
+            "advanced": True,
+        },
+    )
+    """任务硬超时（秒），到点未返回则取消请求并尝试切换下一个模型；防止上游代理静默排队导致主循环饥饿"""
+
+
+def _default_timing_gate_task_config() -> TaskConfig:
+    """创建 Timing Gate 任务默认配置。"""
+
+    return TaskConfig(
+        model_list=[],
+        max_tokens=4096,
+        temperature=0.3,
+        slow_threshold=12.0,
+        selection_strategy="random",
+        hard_timeout=120.0,
+    )
 
 
 class ModelTaskConfig(ConfigBase):
@@ -440,6 +465,36 @@ class ModelTaskConfig(ConfigBase):
     )
     """规划模型配置"""
 
+    timing_gate: TaskConfig = Field(
+        default_factory=_default_timing_gate_task_config,
+        json_schema_extra={
+            "x-widget": "custom",
+            "x-icon": "timer",
+            "advanced": True,
+        },
+    )
+    """Timing Gate 节奏控制模型配置；留空时自动继用 planner 模型"""
+
+    memory: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+            "x-icon": "brain",
+            "advanced": True,
+        },
+    )
+    """记忆模型配置，用于长期记忆总结、抽取、写回等高质量记忆任务；留空时由调用方按需回退"""
+
+    mid_memory: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+            "x-icon": "archive",
+            "advanced": True,
+        },
+    )
+    """中期聊天摘要模型配置；留空时自动继用 planner 模型"""
+
     utils: TaskConfig = Field(
         default_factory=TaskConfig,
         json_schema_extra={
@@ -458,6 +513,16 @@ class ModelTaskConfig(ConfigBase):
         },
     )
     """学习模型配置，用于表达方式学习和黑话学习；留空时自动继用 utils 模型"""
+
+    emoji: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+            "x-icon": "smile",
+            "advanced": True,
+        },
+    )
+    """表情包发送模型配置；留空时保持原有 planner/vlm 选择逻辑"""
 
     vlm: TaskConfig = Field(
         default_factory=TaskConfig,

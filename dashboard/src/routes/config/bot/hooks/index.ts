@@ -11,18 +11,27 @@ export type {
   UseAutoSaveReturnGeneric,
 } from './useAutoSave'
 export {
+  AliasNamesHook,
+  AMemorixSharedMemoryGroupsHook,
+  BehaviorFocusGroupsHook,
   BotPlatformsHook,
+  BotPlatformAccountsHook,
   ChatPromptsHook,
   ChatTalkValueRulesHook,
   ExpressionGroupsHook,
   ExpressionLearningListHook,
+  JargonGroupsHook,
+  JargonLearningListHook,
   KeywordRulesHook,
+  HiddenFieldHook,
   MCPRootItemsHook,
   MCPServersHook,
+  MultipleReplyStyleHook,
   RegexRulesHook,
 } from './complexFieldHooks'
+export { AMemorixRetrievalChatsHook } from './AMemorixRetrievalChatsHook'
+export { AMemorixRetrievalFilterMirrorHook } from './AMemorixRetrievalFilterMirrorHook'
 export { ChatSectionHook } from './ChatSectionHook'
 export { PersonalitySectionHook } from './PersonalitySectionHook'
 export { DebugSectionHook } from './DebugSectionHook'
-export { ExpressionSectionHook } from './ExpressionSectionHook'
 export { BotInfoSectionHook } from './BotInfoSectionHook'

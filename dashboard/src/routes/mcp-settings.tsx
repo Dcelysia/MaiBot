@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
+import { useMutation, useQueries, useQueryClient } from '@tanstack/react-query'
+
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -22,11 +24,14 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { ThinkingIllustration } from '@/components/ui/thinking-illustration'
 import { DynamicConfigForm } from '@/components/dynamic-form'
 import { RestartOverlay } from '@/components/restart-overlay'
 import { useToast } from '@/hooks/use-toast'
 import { getBotConfig, getBotConfigSchema, updateBotConfigSection } from '@/lib/config-api'
 import { fieldHooks } from '@/lib/field-hooks'
+import { unwrapApiResponse } from '@/lib/http'
+import { generateId } from '@/lib/id'
 import { RestartProvider, useRestart } from '@/lib/restart-context'
 import type { ConfigSchema } from '@/types/config-schema'
 import { Copy, Info, Plus, Power, Save, Server, Trash2 } from 'lucide-react'
@@ -42,6 +47,7 @@ interface MCPAuthorization {
 }
 
 interface MCPServerConfig {
+  _uuid?: string
   name: string
   enabled: boolean
   transport: MCPTransport
@@ -100,6 +106,7 @@ function normalizeMCPServer(value: unknown, index: number): MCPServerConfig {
 
   return {
     ...DEFAULT_MCP_SERVER,
+    _uuid: typeof source._uuid === 'string' ? source._uuid : generateId(),
     name: typeof source.name === 'string' ? source.name : `mcp-server-${index + 1}`,
     enabled: typeof source.enabled === 'boolean' ? source.enabled : DEFAULT_MCP_SERVER.enabled,
     transport,
@@ -187,6 +194,7 @@ function MCPServersBlockEditor({
       ...servers,
       {
         ...DEFAULT_MCP_SERVER,
+        _uuid: generateId(),
         name: `mcp-server-${servers.length + 1}`,
       },
     ])
@@ -199,6 +207,7 @@ function MCPServersBlockEditor({
     }
     const nextServer = {
       ...server,
+      _uuid: generateId(),
       name: `${server.name || 'mcp-server'}-copy`,
       args: [...server.args],
       env: { ...server.env },
@@ -245,7 +254,7 @@ function MCPServersBlockEditor({
           </div>
         ) : (
           servers.map((server, index) => (
-            <Card key={`${server.name}-${index}`} className="border-border/70 bg-muted/20 shadow-none">
+            <Card key={server._uuid || `${server.name}-${index}`} className="border-border/70 bg-muted/20 shadow-none">
               <CardHeader className="space-y-3 px-4 py-3">
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -292,7 +301,7 @@ function MCPServersBlockEditor({
               <CardContent className="space-y-4 px-4 pb-4 pt-0">
                 <div className="grid gap-3 md:grid-cols-[12rem_1fr]">
                   <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">传输方式</label>
+                    <span className="text-xs font-medium text-muted-foreground">传输方式</span>
                     <Select
                       value={server.transport}
                       onValueChange={(transport) => updateServer(index, { transport: transport as MCPTransport })}
@@ -308,7 +317,7 @@ function MCPServersBlockEditor({
                   </div>
                   {server.transport === 'stdio' ? (
                     <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground">启动命令</label>
+                      <span className="text-xs font-medium text-muted-foreground">启动命令</span>
                       <Input
                         value={server.command}
                         onChange={(event) => updateServer(index, { command: event.target.value })}
@@ -317,7 +326,7 @@ function MCPServersBlockEditor({
                     </div>
                   ) : (
                     <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground">服务 URL</label>
+                      <span className="text-xs font-medium text-muted-foreground">服务 URL</span>
                       <Input
                         value={server.url}
                         onChange={(event) => updateServer(index, { url: event.target.value })}
@@ -330,7 +339,7 @@ function MCPServersBlockEditor({
                 {server.transport === 'stdio' ? (
                   <div className="grid gap-3 lg:grid-cols-2">
                     <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground">命令参数</label>
+                      <span className="text-xs font-medium text-muted-foreground">命令参数</span>
                       <Textarea
                         value={server.args.join('\n')}
                         onChange={(event) => updateServer(index, {
@@ -344,7 +353,7 @@ function MCPServersBlockEditor({
                       />
                     </div>
                     <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground">环境变量</label>
+                      <span className="text-xs font-medium text-muted-foreground">环境变量</span>
                       <KeyValueEditor
                         value={server.env}
                         onChange={(env) => updateServer(index, { env: asStringMap(env) })}
@@ -355,7 +364,7 @@ function MCPServersBlockEditor({
                   <div className="space-y-3">
                     <div className="grid gap-3 md:grid-cols-2">
                       <div className="space-y-1.5">
-                        <label className="text-xs font-medium text-muted-foreground">认证模式</label>
+                        <span className="text-xs font-medium text-muted-foreground">认证模式</span>
                         <Select
                           value={server.authorization.mode}
                           onValueChange={(mode) => updateAuthorization(index, { mode: mode as MCPAuthorization['mode'] })}
@@ -371,7 +380,7 @@ function MCPServersBlockEditor({
                       </div>
                       {server.authorization.mode === 'bearer' && (
                         <div className="space-y-1.5">
-                          <label className="text-xs font-medium text-muted-foreground">Bearer Token</label>
+                          <span className="text-xs font-medium text-muted-foreground">Bearer Token</span>
                           <Input
                             type="password"
                             value={server.authorization.bearer_token}
@@ -382,7 +391,7 @@ function MCPServersBlockEditor({
                       )}
                     </div>
                     <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground">请求 Headers</label>
+                      <span className="text-xs font-medium text-muted-foreground">请求 Headers</span>
                       <KeyValueEditor
                         value={server.headers}
                         onChange={(headers) => updateServer(index, { headers: asStringMap(headers) })}
@@ -393,7 +402,7 @@ function MCPServersBlockEditor({
 
                 <div className="grid gap-3 md:grid-cols-2">
                   <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">HTTP 请求超时（秒）</label>
+                    <span className="text-xs font-medium text-muted-foreground">HTTP 请求超时（秒）</span>
                     <Input
                       type="number"
                       min={0.1}
@@ -405,7 +414,7 @@ function MCPServersBlockEditor({
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">会话读取超时（秒）</label>
+                    <span className="text-xs font-medium text-muted-foreground">会话读取超时（秒）</span>
                     <Input
                       type="number"
                       min={0.1}
@@ -435,16 +444,16 @@ export function MCPSettingsPage() {
 }
 
 function MCPSettingsPageContent() {
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
+  // 本地可编辑草稿：服务端加载的 config 拷贝进来后由用户编辑，保存前不回写 query 缓存
   const [mcpConfig, setMcpConfig] = useState<ConfigSectionData>({})
   const [mcpSchema, setMcpSchema] = useState<ConfigSchema | null>(null)
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [restartNoticeVisible, setRestartNoticeVisible] = useState(
     () => localStorage.getItem('mcp-settings-restart-notice-dismissed') !== 'true',
   )
   const { toast } = useToast()
   const { triggerRestart, isRestarting } = useRestart()
+  const queryClient = useQueryClient()
 
   useEffect(() => {
     const hookEntries = [
@@ -462,85 +471,77 @@ function MCPSettingsPageContent() {
     }
   }, [])
 
-  const loadConfig = useCallback(async () => {
-    try {
-      setLoading(true)
-      const [configResult, schemaResult] = await Promise.all([getBotConfig(), getBotConfigSchema()])
+  // config + schema 并行加载；config-api 仍返回 ApiResponse，用 unwrapApiResponse 桥接为 throw 契约
+  const [configQuery, schemaQuery] = useQueries({
+    queries: [
+      {
+        queryKey: ['mcp-settings', 'config'],
+        queryFn: () => getBotConfig().then(unwrapApiResponse),
+      },
+      {
+        queryKey: ['mcp-settings', 'schema'],
+        queryFn: () => getBotConfigSchema().then(unwrapApiResponse),
+      },
+    ],
+  })
 
-      if (!configResult.success) {
-        toast({
-          title: '加载失败',
-          description: configResult.error,
-          variant: 'destructive',
+  const loading = configQuery.isPending || schemaQuery.isPending
+  const loadError = configQuery.error ?? schemaQuery.error
+
+  // 把 query.data 作为草稿的初始值/重置来源：数据到达（或重新拉取）后回填本地编辑 state。
+  // 用「渲染期重置」模式（React 官方推荐）替代 effect，以 query 的更新时间戳为版本标记，
+  // 避免在 effect 里 setState 触发的级联渲染。
+  const dataVersion =
+    configQuery.data !== undefined && schemaQuery.data !== undefined
+      ? `${configQuery.dataUpdatedAt}:${schemaQuery.dataUpdatedAt}`
+      : null
+  const [seededVersion, setSeededVersion] = useState<string | null>(null)
+  if (dataVersion !== null && dataVersion !== seededVersion) {
+    const configPayload = configQuery.data as { config?: Record<string, unknown> } & Record<string, unknown>
+    const fullConfig = (configPayload.config ?? configPayload) as Record<string, unknown>
+    const schemaPayload = schemaQuery.data as { schema?: ConfigSchema } & ConfigSchema
+    const fullSchema = (schemaPayload.schema ?? schemaPayload) as ConfigSchema
+
+    setSeededVersion(dataVersion)
+    setMcpConfig((fullConfig.mcp ?? {}) as ConfigSectionData)
+    setMcpSchema(fullSchema.nested?.mcp ?? null)
+    setHasUnsavedChanges(false)
+  }
+
+  // 保存：失败由全局 mutation 错误 toast 呈现（meta.errorTitle 定制标题）
+  const saveMutation = useMutation({
+    mutationFn: () => {
+      const configToSave = { ...mcpConfig }
+      if (Array.isArray(configToSave.servers)) {
+        configToSave.servers = configToSave.servers.map((server: MCPServerConfig) => {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { _uuid, ...rest } = server
+          return rest
         })
-        return
       }
-
-      if (!schemaResult.success) {
-        toast({
-          title: '加载失败',
-          description: schemaResult.error,
-          variant: 'destructive',
-        })
-        return
-      }
-
-      const configPayload = configResult.data as { config?: Record<string, unknown> } & Record<string, unknown>
-      const fullConfig = (configPayload.config ?? configPayload) as Record<string, unknown>
-      const schemaPayload = schemaResult.data as { schema?: ConfigSchema } & ConfigSchema
-      const fullSchema = (schemaPayload.schema ?? schemaPayload) as ConfigSchema
-
-      setMcpConfig((fullConfig.mcp ?? {}) as ConfigSectionData)
-      setMcpSchema(fullSchema.nested?.mcp ?? null)
-      setHasUnsavedChanges(false)
-    } catch (error) {
-      console.error('加载 MCP 设置失败:', error)
-      toast({
-        title: '加载失败',
-        description: (error as Error).message,
-        variant: 'destructive',
-      })
-    } finally {
-      setLoading(false)
-    }
-  }, [toast])
-
-  useEffect(() => {
-    void loadConfig()
-  }, [loadConfig])
-
-  const saveConfig = useCallback(async (): Promise<boolean> => {
-    try {
-      setSaving(true)
-      const result = await updateBotConfigSection('mcp', mcpConfig)
-
-      if (!result.success) {
-        toast({
-          title: '保存失败',
-          description: result.error,
-          variant: 'destructive',
-        })
-        return false
-      }
-
+      return updateBotConfigSection('mcp', configToSave).then(unwrapApiResponse)
+    },
+    meta: { errorTitle: '保存失败' },
+    onSuccess: () => {
       setHasUnsavedChanges(false)
       toast({
         title: '保存成功',
         description: 'MCP 设置已保存，重启后生效。',
       })
+      void queryClient.invalidateQueries({ queryKey: ['mcp-settings'] })
+    },
+  })
+  const saving = saveMutation.isPending
+
+  const saveConfig = useCallback(async (): Promise<boolean> => {
+    try {
+      await saveMutation.mutateAsync()
       return true
-    } catch (error) {
-      console.error('保存 MCP 设置失败:', error)
-      toast({
-        title: '保存失败',
-        description: (error as Error).message,
-        variant: 'destructive',
-      })
+    } catch {
+      // 失败已由全局 mutation 错误 toast 呈现
       return false
-    } finally {
-      setSaving(false)
     }
-  }, [mcpConfig, toast])
+  }, [saveMutation])
 
   const saveAndRestart = useCallback(async () => {
     const saved = await saveConfig()
@@ -621,12 +622,28 @@ function MCPSettingsPageContent() {
         )}
 
         {loading && (
-          <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
-            加载中...
+          <div className="flex h-64 items-center justify-center">
+            <ThinkingIllustration size="lg" />
           </div>
         )}
 
-        {!loading && (
+        {!loading && loadError && (
+          <div className="flex h-64 flex-col items-center justify-center gap-2">
+            <p className="text-sm text-destructive">{loadError.message}</p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void configQuery.refetch()
+                void schemaQuery.refetch()
+              }}
+            >
+              重试
+            </Button>
+          </div>
+        )}
+
+        {!loading && !loadError && (
           <MCPServersBlockEditor
             servers={mcpServers}
             onChange={(servers) => {
@@ -639,7 +656,7 @@ function MCPSettingsPageContent() {
           />
         )}
 
-        {!loading && formSchema && (
+        {!loading && !loadError && formSchema && (
           <DynamicConfigForm
             schema={formSchema}
             values={{ mcp: mcpConfig }}
@@ -656,7 +673,7 @@ function MCPSettingsPageContent() {
           />
         )}
 
-        {!loading && !formSchema && (
+        {!loading && !loadError && !formSchema && (
           <Alert>
             <Info className="h-4 w-4" />
             <AlertDescription>当前配置 schema 中没有找到 MCP 设置。</AlertDescription>

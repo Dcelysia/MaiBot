@@ -31,6 +31,7 @@ import inspect
 import tomlkit
 
 from src.common.logger import get_logger
+from src.common.shutdown import is_shutdown_requested
 from src.config.config import config_manager
 from src.config.file_watcher import FileChange, FileWatcher
 from src.platform_io import DeliveryBatch, InboundMessageEnvelope, get_platform_io_manager
@@ -45,12 +46,12 @@ from src.plugin_runtime.dependency_pipeline import PluginDependencyPipeline
 from src.plugin_runtime.hook_catalog import register_builtin_hook_specs
 from src.plugin_runtime.host.hook_dispatcher import HookDispatchResult, HookDispatcher
 from src.plugin_runtime.host.hook_spec_registry import HookSpec, HookSpecRegistry
-from src.plugin_runtime.host.message_utils import MessageDict, PluginMessageUtils
 from src.plugin_runtime.protocol.envelope import InspectPluginConfigResultPayload
-from src.plugin_runtime.runner.manifest_validator import ManifestValidator
+from src.plugin_runtime.runner.manifest_validator import ManifestValidator, is_reserved_plugin_directory
 
 if TYPE_CHECKING:
     from src.chat.message_receive.message import SessionMessage
+    from src.plugin_runtime.host.message_utils import MessageDict
     from src.plugin_runtime.host.supervisor import PluginSupervisor
 
 logger = get_logger("plugin_runtime.integration")
@@ -91,8 +92,6 @@ class PluginRuntimeManager(
 
     def __init__(self) -> None:
         """初始化插件运行时管理器。"""
-        from src.plugin_runtime.host.supervisor import PluginSupervisor
-
         self._builtin_supervisor: Optional[PluginSupervisor] = None
         self._third_party_supervisor: Optional[PluginSupervisor] = None
         self._started: bool = False
@@ -100,7 +99,10 @@ class PluginRuntimeManager(
         self._plugin_source_watcher_subscription_id: Optional[str] = None
         self._plugin_config_watcher_subscriptions: Dict[str, Tuple[Path, str]] = {}
         self._plugin_path_cache: Dict[str, Path] = {}
-        self._manifest_validator: ManifestValidator = ManifestValidator(validate_python_package_dependencies=False)
+        self._manifest_validator: ManifestValidator = ManifestValidator(
+            validate_python_package_dependencies=False,
+            log_compat_warnings=False,
+        )
         self._plugin_dependency_pipeline: PluginDependencyPipeline = PluginDependencyPipeline()
         self._blocked_plugin_reasons: Dict[str, str] = {}
         self._config_reload_callback: Callable[[Sequence[str]], Awaitable[None]] = self._handle_main_config_reload
@@ -120,6 +122,8 @@ class PluginRuntimeManager(
         """
         session_message = envelope.session_message
         if session_message is None and envelope.payload is not None:
+            from src.plugin_runtime.host.message_utils import PluginMessageUtils
+
             session_message = PluginMessageUtils._build_session_message_from_dict(dict(envelope.payload))
         if session_message is None:
             raise ValueError("Platform IO 入站封装缺少可用的 SessionMessage 或 payload")
@@ -145,7 +149,7 @@ class PluginRuntimeManager(
     @classmethod
     def _discover_plugin_dependency_map(cls, plugin_dirs: Iterable[Path]) -> Dict[str, List[str]]:
         """扫描指定插件目录集合，返回 ``plugin_id -> dependencies`` 映射。"""
-        validator = ManifestValidator(validate_python_package_dependencies=False)
+        validator = ManifestValidator(validate_python_package_dependencies=False, log_compat_warnings=False)
         return validator.build_plugin_dependency_map(plugin_dirs)
 
     @classmethod
@@ -158,7 +162,7 @@ class PluginRuntimeManager(
         Returns:
             Dict[str, str]: 需要阻止加载的插件 ID 与原因映射。
         """
-        validator = ManifestValidator(validate_python_package_dependencies=False)
+        validator = ManifestValidator(validate_python_package_dependencies=False, log_compat_warnings=False)
         provider_owners: Dict[str, List[str]] = {}
         for _plugin_path, manifest in validator.iter_plugin_manifests(plugin_dirs, require_entrypoint=True):
             for client_type in manifest.llm_provider_client_types:
@@ -178,12 +182,12 @@ class PluginRuntimeManager(
         return blocked_reasons
 
     @classmethod
-    def _build_group_start_order(
+    def _get_group_dependency_flags(
         cls,
         builtin_dirs: Sequence[Path],
         third_party_dirs: Sequence[Path],
-    ) -> List[str]:
-        """根据跨 Supervisor 依赖关系决定 Runner 启动顺序。"""
+    ) -> tuple[bool, bool]:
+        """返回内置组与第三方组之间的跨 Supervisor 依赖关系。"""
 
         builtin_dependencies = cls._discover_plugin_dependency_map(builtin_dirs)
         third_party_dependencies = cls._discover_plugin_dependency_map(third_party_dirs)
@@ -199,6 +203,21 @@ class PluginRuntimeManager(
             dependency in builtin_plugin_ids
             for dependencies in third_party_dependencies.values()
             for dependency in dependencies
+        )
+
+        return builtin_needs_third_party, third_party_needs_builtin
+
+    @classmethod
+    def _build_group_start_order(
+        cls,
+        builtin_dirs: Sequence[Path],
+        third_party_dirs: Sequence[Path],
+    ) -> List[str]:
+        """根据跨 Supervisor 依赖关系决定 Runner 启动顺序。"""
+
+        builtin_needs_third_party, third_party_needs_builtin = cls._get_group_dependency_flags(
+            builtin_dirs,
+            third_party_dirs,
         )
 
         if builtin_needs_third_party and third_party_needs_builtin:
@@ -369,8 +388,38 @@ class PluginRuntimeManager(
             "third_party": self._third_party_supervisor,
         }
         start_order = self._build_group_start_order(builtin_dirs, third_party_dirs)
+        builtin_needs_third_party, third_party_needs_builtin = self._get_group_dependency_flags(
+            builtin_dirs,
+            third_party_dirs,
+        )
 
         try:
+            if not builtin_needs_third_party and not third_party_needs_builtin:
+                independent_supervisors = [
+                    supervisor
+                    for group_name in start_order
+                    if (supervisor := supervisor_groups.get(group_name)) is not None
+                ]
+                for supervisor in independent_supervisors:
+                    supervisor.set_external_available_plugins({})
+                    set_blocked_plugin_reasons = getattr(supervisor, "set_blocked_plugin_reasons", None)
+                    if callable(set_blocked_plugin_reasons):
+                        set_blocked_plugin_reasons(self._blocked_plugin_reasons)
+
+                results = await asyncio.gather(
+                    *(supervisor.start() for supervisor in independent_supervisors),
+                    return_exceptions=True,
+                )
+                for supervisor, result in zip(independent_supervisors, results, strict=False):
+                    if isinstance(result, Exception):
+                        await asyncio.gather(
+                            *(started_supervisor.stop() for started_supervisor in independent_supervisors),
+                            return_exceptions=True,
+                        )
+                        raise result
+                    started_supervisors.append(supervisor)
+                return started_supervisors
+
             for group_name in start_order:
                 supervisor = supervisor_groups.get(group_name)
                 if supervisor is None:
@@ -511,6 +560,8 @@ class PluginRuntimeManager(
         if self._config_reload_callback_registered:
             config_manager.unregister_reload_callback(self._config_reload_callback)
             self._config_reload_callback_registered = False
+        if is_shutdown_requested():
+            await self._hook_dispatcher.stop()
 
         coroutines: List[Coroutine[Any, Any, None]] = []
         if self._builtin_supervisor:
@@ -664,6 +715,19 @@ class PluginRuntimeManager(
         for supervisor in self.supervisors:
             statuses.update(supervisor.get_plugin_load_statuses())
         return statuses
+
+    def get_plugin_circuit_statuses(self) -> Dict[str, Dict[str, Any]]:
+        """返回当前插件熔断状态。"""
+
+        from src.plugin_runtime.host.circuit_breaker import get_plugin_circuit_breaker
+
+        return get_plugin_circuit_breaker().get_plugin_statuses()
+
+    @property
+    def is_loading(self) -> bool:
+        """返回插件运行时是否仍有 Supervisor 处于加载阶段。"""
+
+        return any(bool(getattr(supervisor, "is_loading", False)) for supervisor in self.supervisors)
 
     def _build_external_available_plugins_for_supervisor(self, target_supervisor: "PluginSupervisor") -> Dict[str, str]:
         """收集某个 Supervisor 可用的外部插件版本映射。"""
@@ -979,9 +1043,9 @@ class PluginRuntimeManager(
     async def bridge_event(
         self,
         event_type_value: str,
-        message_dict: Optional[MessageDict] = None,
+        message_dict: Optional["MessageDict"] = None,
         extra_args: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[bool, Optional[MessageDict]]:
+    ) -> Tuple[bool, Optional["MessageDict"]]:
         """将事件分发到所有 Supervisor
 
         Returns:
@@ -991,12 +1055,15 @@ class PluginRuntimeManager(
             return True, None
 
         new_event_type: str = _EVENT_TYPE_MAP.get(event_type_value, event_type_value)
-        modified: Optional[MessageDict] = None
-        current_message: Optional["SessionMessage"] = (
-            PluginMessageUtils._build_session_message_from_dict(dict(message_dict))
-            if message_dict is not None
-            else None
-        )
+
+        modified: Optional["MessageDict"] = None
+        plugin_message_utils: Any | None = None
+        current_message: Optional["SessionMessage"] = None
+        if message_dict is not None:
+            from src.plugin_runtime.host.message_utils import PluginMessageUtils
+
+            plugin_message_utils = PluginMessageUtils
+            current_message = plugin_message_utils._build_session_message_from_dict(dict(message_dict))
 
         for sv in self.supervisors:
             try:
@@ -1006,8 +1073,12 @@ class PluginRuntimeManager(
                     extra_args=extra_args,
                 )
                 if mod is not None:
+                    if plugin_message_utils is None:
+                        from src.plugin_runtime.host.message_utils import PluginMessageUtils
+
+                        plugin_message_utils = PluginMessageUtils
                     current_message = mod
-                    modified = PluginMessageUtils._session_message_to_dict(mod)
+                    modified = plugin_message_utils._session_message_to_dict(mod)
                 if not cont:
                     return False, modified
             except Exception as e:
@@ -1164,7 +1235,7 @@ class PluginRuntimeManager(
     def _find_duplicate_plugin_ids(cls, plugin_dirs: List[Path]) -> Dict[str, List[Path]]:
         """扫描插件目录，找出被多个目录重复声明的插件 ID。"""
         plugin_locations: Dict[str, List[Path]] = {}
-        validator = ManifestValidator(validate_python_package_dependencies=False)
+        validator = ManifestValidator(validate_python_package_dependencies=False, log_compat_warnings=False)
         for plugin_path, manifest in validator.iter_plugin_manifests(plugin_dirs):
             plugin_locations.setdefault(manifest.id, []).append(plugin_path)
 
@@ -1231,7 +1302,7 @@ class PluginRuntimeManager(
             if not plugin_root.is_dir():
                 continue
             for entry in plugin_root.iterdir():
-                if entry.is_dir():
+                if entry.is_dir() and not is_reserved_plugin_directory(entry):
                     yield entry.resolve()
 
     def _read_plugin_id_from_plugin_path(self, plugin_path: Path) -> Optional[str]:

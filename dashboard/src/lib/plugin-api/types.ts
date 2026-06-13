@@ -1,3 +1,5 @@
+import type { PluginDisplay, PluginType } from '@/types/plugin'
+
 /**
  * Git 安装状态
  */
@@ -25,6 +27,7 @@ export interface InstalledPlugin {
   id: string
   manifest: {
     manifest_version: number
+    id?: string
     name: string
     version: string
     description: string
@@ -40,14 +43,21 @@ export interface InstalledPlugin {
     homepage_url?: string
     repository_url?: string
     keywords?: string[]
-    categories?: string[]
+    plugin_type?: PluginType | string
+    display?: PluginDisplay
     [key: string]: unknown  // 允许其他字段
   }
   path: string
   enabled?: boolean
   disabled?: boolean
   loaded?: boolean
-  load_status?: 'success' | 'failed' | 'inactive' | 'disabled' | 'unknown'
+  load_status?: 'success' | 'failed' | 'inactive' | 'disabled' | 'unknown' | 'loading'
+  circuit_status?: {
+    state: 'open' | 'half_open'
+    remaining_sec: number
+    cooldown_level: number
+    half_open_inflight: boolean
+  } | null
 }
 /**
  * 旧版本插件格式(直接包含 version 字段)
@@ -70,6 +80,12 @@ export interface PluginLoadProgress {
   plugin_id?: string
   total_plugins: number
   loaded_plugins: number
+  mirror_id?: string
+  mirror_name?: string
+  mirror_index?: number
+  total_mirrors?: number
+  attempt?: number
+  max_attempts?: number
 }
 
 /**
@@ -80,6 +96,7 @@ export interface ItemFieldDefinition {
   label?: string
   placeholder?: string
   default?: unknown
+  i18n?: Record<string, Record<string, string>>
 }
 
 /**
@@ -101,6 +118,7 @@ export interface ConfigFieldSchema {
   label: string
   placeholder?: string
   hint?: string
+  i18n?: Record<string, Record<string, string>>
   icon?: string
   hidden: boolean
   disabled: boolean
@@ -125,6 +143,7 @@ export interface ConfigSectionSchema {
   name: string
   title: string
   description?: string
+  i18n?: Record<string, Record<string, string>>
   icon?: string
   collapsed: boolean
   order: number
@@ -137,6 +156,7 @@ export interface ConfigSectionSchema {
 export interface ConfigTabSchema {
   id: string
   title: string
+  i18n?: Record<string, Record<string, string>>
   sections: string[]
   icon?: string
   order: number
@@ -161,6 +181,7 @@ export interface PluginConfigSchema {
     version: string
     description: string
     author: string
+    i18n?: Record<string, Record<string, string>>
   }
   sections: Record<string, ConfigSectionSchema>
   layout: ConfigLayoutSchema

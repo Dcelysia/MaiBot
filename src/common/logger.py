@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
+import asyncio
 import json
 import logging
 import threading
@@ -27,6 +28,11 @@ _ws_handler = None
 # 全局标志，防止重复初始化
 _logging_initialized = False
 _cleanup_task_started = False
+
+DEFAULT_LIBRARY_LOG_LEVELS: dict[str, str] = {
+    "aiohttp": "WARNING",
+    "PIL": "WARNING",
+}
 
 
 def get_file_handler():
@@ -197,11 +203,42 @@ class WebSocketLogHandler(logging.Handler):
         self.loop = loop
         self._initialized = True
 
+    @staticmethod
+    def _consume_broadcast_result(task: asyncio.Task) -> None:
+        """消费日志广播任务异常，避免后台任务异常泄漏到事件循环。"""
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    def _schedule_broadcast(self, log_data: dict, target_loop: asyncio.AbstractEventLoop) -> None:
+        """在目标事件循环内创建日志广播任务。"""
+        if self.loop is not target_loop or target_loop.is_closed():
+            return
+
+        try:
+            from src.webui.logs_ws import broadcast_log
+
+            broadcast_coro = broadcast_log(log_data)
+            try:
+                task = target_loop.create_task(broadcast_coro)
+            except Exception:
+                broadcast_coro.close()
+                raise
+            task.add_done_callback(self._consume_broadcast_result)
+        except RuntimeError:
+            pass
+        except Exception:
+            pass
+
     def emit(self, record):
         """发送日志到 WebSocket 客户端"""
-        if not self._initialized or self.loop is None:
+        target_loop = self.loop
+        if not self._initialized or target_loop is None:
             return
-        if self.loop.is_closed():
+        if target_loop.is_closed() or not target_loop.is_running():
             return
 
         try:
@@ -211,9 +248,13 @@ class WebSocketLogHandler(logging.Handler):
 
             # 如果是 JSON 格式(文件格式化器),解析它
             message = formatted_msg
+            module_name = record.name
+            level_name = record.levelname
             try:
                 log_dict = json.loads(formatted_msg)
                 message = log_dict.get("event", formatted_msg)
+                module_name = log_dict.get("logger_name") or log_dict.get("module") or record.name
+                level_name = str(log_dict.get("level") or record.levelname).upper()
             except (json.JSONDecodeError, ValueError):
                 # 不是 JSON,直接使用消息
                 message = formatted_msg
@@ -226,22 +267,14 @@ class WebSocketLogHandler(logging.Handler):
             log_data = {
                 "id": log_id,
                 "timestamp": datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S"),
-                "level": record.levelname,
-                "module": record.name,
+                "level": level_name,
+                "module": module_name,
                 "message": message,
             }
 
             # 异步广播日志(不阻塞日志记录)
             try:
-                import asyncio
-                from src.webui.logs_ws import broadcast_log
-
-                coroutine = broadcast_log(log_data)
-                try:
-                    asyncio.run_coroutine_threadsafe(coroutine, self.loop)
-                except Exception:
-                    coroutine.close()
-                    raise
+                target_loop.call_soon_threadsafe(self._schedule_broadcast, log_data, target_loop)
             except Exception:
                 # WebSocket 推送失败不影响日志记录
                 pass
@@ -249,6 +282,12 @@ class WebSocketLogHandler(logging.Handler):
         except Exception:
             # 不要让 WebSocket 错误影响日志系统
             self.handleError(record)
+
+    def close(self):
+        """关闭 WebSocket 日志推送。"""
+        self._initialized = False
+        self.loop = None
+        super().close()
 
 
 # 旧的轮转文件处理器已移除，现在使用基于时间戳的处理器
@@ -321,7 +360,7 @@ def load_log_config():  # sourcery skip: use-contextlib-suppress
             "uvicorn",
             "jieba",
         ],
-        "library_log_levels": {"aiohttp": "WARNING"},
+        "library_log_levels": DEFAULT_LIBRARY_LOG_LEVELS.copy(),
     }
 
     try:
@@ -335,6 +374,15 @@ def load_log_config():  # sourcery skip: use-contextlib-suppress
 
 
 LOG_CONFIG = load_log_config()
+
+
+def get_library_log_levels() -> dict[str, str]:
+    """获取第三方库日志级别，并补齐内置噪声库的默认限制。"""
+    library_log_levels = DEFAULT_LIBRARY_LOG_LEVELS.copy()
+    configured_levels = LOG_CONFIG.get("library_log_levels", {})
+    if hasattr(configured_levels, "items"):
+        library_log_levels.update(dict(configured_levels.items()))
+    return library_log_levels
 
 
 def get_timestamp_format():
@@ -379,7 +427,7 @@ def configure_third_party_loggers():
         lib_logger.propagate = False  # 阻止向上传播
 
     # 设置特定级别的库
-    library_log_levels = LOG_CONFIG.get("library_log_levels", {})
+    library_log_levels = get_library_log_levels()
     for lib_name, level_name in library_log_levels.items():
         lib_logger = logging.getLogger(lib_name)
         level = getattr(logging, level_name.upper(), logging.WARNING)
@@ -404,7 +452,7 @@ def reconfigure_existing_loggers():
         if isinstance(logger_obj, logging.Logger):
             # 检查是否是第三方库logger
             suppress_libraries = LOG_CONFIG.get("suppress_libraries", [])
-            library_log_levels = LOG_CONFIG.get("library_log_levels", {})
+            library_log_levels = get_library_log_levels()
 
             # 如果在屏蔽列表中
             if any(name.startswith(lib) for lib in suppress_libraries):
@@ -643,7 +691,17 @@ class ModuleColoredConsoleRenderer:
         # 处理其他字段
         extras = []
         for key, value in event_dict.items():
-            if key not in ("timestamp", "level", "logger_name", "logger", "event", "module", "lineno", "pathname"):
+            if key not in (
+                "timestamp",
+                "level",
+                "logger_name",
+                "logger",
+                "event",
+                "module",
+                "lineno",
+                "pathname",
+                "exception",
+            ):
                 # 确保值也转换为字符串
                 if isinstance(value, (dict, list)):
                     try:
@@ -663,7 +721,12 @@ class ModuleColoredConsoleRenderer:
         if extras:
             parts.append(" ".join(extras))
 
-        return " ".join(parts)
+        rendered_message = " ".join(parts)
+        exception_text = event_dict.get("exception")
+        if exception_text:
+            return f"{rendered_message}\n{exception_text}"
+
+        return rendered_message
 
 
 # 配置标准logging以支持文件输出和压缩
@@ -693,6 +756,7 @@ def configure_structlog():
             convert_pathname_to_module,
             structlog.processors.StackInfoRenderer(),
             structlog.dev.set_exc_info,
+            structlog.processors.format_exc_info,
             structlog.processors.TimeStamper(fmt=get_timestamp_format(), utc=False),
             # 根据输出类型选择不同的渲染器
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,

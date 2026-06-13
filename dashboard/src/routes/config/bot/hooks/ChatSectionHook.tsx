@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react'
+import { DynamicField } from '@/components/dynamic-form'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -29,6 +30,7 @@ import {
 } from '@/components/ui/popover'
 import { Plus, Trash2, Eye, Clock } from 'lucide-react'
 import type { FieldHookComponent } from '@/lib/field-hooks'
+import type { ConfigSchema, FieldSchema } from '@/types/config-schema'
 import type { ChatConfig } from '../types'
 
 // 时间选择组件
@@ -41,7 +43,8 @@ const TimeRangePicker = React.memo(function TimeRangePicker({
 }) {
   // 解析初始值
   const parsedValue = useMemo(() => {
-    const parts = value.split('-')
+    const normalizedValue = value.trim()
+    const parts = normalizedValue.split('-')
     if (parts.length === 2) {
       const [start, end] = parts
       const [sh, sm] = start.split(':')
@@ -60,6 +63,7 @@ const TimeRangePicker = React.memo(function TimeRangePicker({
       endMinute: '59',
     }
   }, [value])
+  const displayValue = value.trim() === '' ? '兜底' : value.trim() === '*' ? '强制全天 (*)' : value
 
   const [startHour, setStartHour] = useState(parsedValue.startHour)
   const [startMinute, setStartMinute] = useState(parsedValue.startMinute)
@@ -84,16 +88,46 @@ const TimeRangePicker = React.memo(function TimeRangePicker({
     onChange(newValue)
   }
 
+  const useCurrentTimeRange = () => {
+    updateTime(startHour, startMinute, endHour, endMinute)
+  }
+
   return (
     <Popover>
       <PopoverTrigger asChild>
         <Button variant="outline" className="w-full justify-start font-mono text-sm">
           <Clock className="h-4 w-4 mr-2" />
-          {value || '选择时间段'}
+          {displayValue}
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-72 sm:w-80">
         <div className="space-y-4">
+          <div className="grid grid-cols-3 gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant={value.trim() === '' ? 'default' : 'outline'}
+              onClick={() => onChange('')}
+            >
+              兜底
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={value.trim() && value.trim() !== '*' ? 'default' : 'outline'}
+              onClick={useCurrentTimeRange}
+            >
+              时间段
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={value.trim() === '*' ? 'default' : 'outline'}
+              onClick={() => onChange('*')}
+            >
+              *
+            </Button>
+          </div>
           <div>
             <h4 className="font-medium text-sm mb-3">开始时间</h4>
             <div className="grid grid-cols-2 gap-2 sm:gap-3">
@@ -221,16 +255,96 @@ const RulePreview = React.memo(function RulePreview({ rule }: { rule: { target: 
   )
 })
 
+const MANUAL_CHAT_FIELD_NAMES = new Set([
+  'talk_value',
+  'think_mode',
+  'mentioned_bot_reply',
+  'max_context_size',
+  'planner_smooth',
+  'plan_reply_log_max_per_chat',
+  'llm_quote',
+  'enable_talk_value_rules',
+  'talk_value_rules',
+])
+
+const resolveSchemaFields = (
+  schema: ConfigSchema | FieldSchema | undefined,
+  nestedSchema: ConfigSchema | undefined
+) => {
+  if (nestedSchema?.fields) {
+    return nestedSchema.fields
+  }
+
+  if (schema && 'fields' in schema) {
+    return schema.fields
+  }
+
+  return []
+}
+
+function MetadataAdvancedFields({
+  advancedVisible,
+  config,
+  fieldPath,
+  nestedSchema,
+  schema,
+  updateConfig,
+}: {
+  advancedVisible: boolean
+  config: Record<string, unknown>
+  fieldPath: string
+  nestedSchema?: ConfigSchema
+  schema?: ConfigSchema | FieldSchema
+  updateConfig: (updates: Record<string, unknown>) => void
+}) {
+  if (!advancedVisible) {
+    return null
+  }
+
+  const advancedFields = resolveSchemaFields(schema, nestedSchema).filter(
+    (field) => field.advanced && !MANUAL_CHAT_FIELD_NAMES.has(field.name)
+  )
+
+  if (advancedFields.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="border-t pt-4 space-y-4">
+      <h4 className="text-sm font-semibold text-sky-700 dark:text-sky-300">高级配置</h4>
+      <div className="grid gap-4">
+        {advancedFields.map((field) => (
+          <DynamicField
+            key={field.name}
+            fieldPath={`${fieldPath}.${field.name}`}
+            schema={field}
+            value={config[field.name]}
+            onChange={(nextValue) => updateConfig({ [field.name]: nextValue })}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
 /**
  * ChatSection as a Field Hook Component
  * This component replaces the entire 'chat' nested config section rendering
  */
-export const ChatSectionHook: FieldHookComponent = ({ value, onChange }) => {
+export const ChatSectionHook: FieldHookComponent = ({
+  value,
+  onChange,
+  fieldPath,
+  nestedSchema,
+  schema,
+  advancedVisible = false,
+}) => {
   // Cast value to ChatConfig (assuming it's the entire chat config object)
   const config = value as ChatConfig
+  const configRecord = config as unknown as Record<string, unknown>
 
   // Helper to update config
-  const updateConfig = (updates: Partial<ChatConfig>) => {
+  const updateConfig = (updates: Record<string, unknown>) => {
     if (onChange) {
       onChange({ ...config, ...updates })
     }
@@ -241,7 +355,7 @@ export const ChatSectionHook: FieldHookComponent = ({ value, onChange }) => {
     updateConfig({
       talk_value_rules: [
         ...config.talk_value_rules,
-        { target: '', time: '00:00-23:59', value: 1.0 },
+        { target: '', time: '', value: 1.0 },
       ],
     })
   }
@@ -333,6 +447,15 @@ export const ChatSectionHook: FieldHookComponent = ({ value, onChange }) => {
               }
             />
           </div>
+
+          <MetadataAdvancedFields
+            advancedVisible={advancedVisible}
+            config={configRecord}
+            fieldPath={fieldPath}
+            nestedSchema={nestedSchema}
+            schema={schema}
+            updateConfig={updateConfig}
+          />
 
           <div className="grid gap-2">
             <Label htmlFor="planner_smooth">规划器平滑</Label>
@@ -546,7 +669,7 @@ export const ChatSectionHook: FieldHookComponent = ({ value, onChange }) => {
                         onChange={(v) => updateTalkValueRule(index, 'time', v)}
                       />
                       <p className="text-xs text-muted-foreground">
-                        支持跨夜区间，例如 23:00-02:00
+                        留空表示兜底，* 表示强制全天；支持跨夜区间，例如 23:00-02:00
                       </p>
                     </div>
 
@@ -604,8 +727,9 @@ export const ChatSectionHook: FieldHookComponent = ({ value, onChange }) => {
             </h5>
             <ul className="text-xs text-blue-800 dark:text-blue-200 space-y-1">
               <li>• <strong>Target 为空</strong>：全局规则，对所有聊天生效</li>
-              <li>• <strong>Target 指定</strong>：仅对特定聊天流生效（格式：platform:id:type）</li>
-              <li>• <strong>优先级</strong>：先匹配具体聊天流规则，再匹配全局规则</li>
+              <li>• <strong>Target 部分填写</strong>：只填平台或聊天流 ID 时，作为对应范围的默认值</li>
+              <li>• <strong>Target 指定</strong>：对特定聊天流生效（格式：platform:id:type），* 表示通配覆盖</li>
+              <li>• <strong>优先级</strong>：精确目标高于通配目标，高于单字段默认，高于全局；同一目标范围内 * 高于时间段，高于兜底</li>
               <li>• <strong>时间支持跨夜</strong>：例如 23:00-02:00 表示晚上11点到次日凌晨2点</li>
               <li>• <strong>数值范围</strong>：建议 0-1，0 表示完全沉默，1 表示正常发言</li>
             </ul>

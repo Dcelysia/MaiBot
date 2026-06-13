@@ -1,4 +1,4 @@
-﻿"""
+"""
 发送服务模块。
 
 统一封装内部模块的出站消息发送逻辑：
@@ -331,9 +331,7 @@ def _build_message_sequence_from_custom_message(
         return MessageSequence(components=[TextComponent(text=str(content))])
 
     if normalized_type in {"image", "emoji", "voice"}:
-        return MessageSequence(
-            components=[_build_binary_component_from_base64(normalized_type, str(content))]
-        )
+        return MessageSequence(components=[_build_binary_component_from_base64(normalized_type, str(content))])
 
     if normalized_type == "at":
         return MessageSequence(components=[AtComponent(target_user_id=str(content))])
@@ -540,17 +538,19 @@ def _build_outbound_session_message(
 
     group_info: Optional[GroupInfo] = None
     if target_stream.group_id:
-        group_name = ""
+        group_name = str(target_stream.group_name or "").strip()
         if (
-            target_stream.context
+            not group_name
+            and target_stream.context
             and target_stream.context.message
             and target_stream.context.message.message_info.group_info
         ):
             group_name = target_stream.context.message.message_info.group_info.group_name
-        group_info = GroupInfo(
-            group_id=target_stream.group_id,
-            group_name=group_name,
-        )
+        if group_name:
+            group_info = GroupInfo(
+                group_id=target_stream.group_id,
+                group_name=group_name,
+            )
 
     additional_config: Dict[str, object] = _inherit_platform_io_route_metadata(target_stream)
     if selected_expressions is not None:
@@ -571,7 +571,9 @@ def _build_outbound_session_message(
     )
     outbound_message.raw_message = _clone_message_sequence(message_sequence)
     outbound_message.session_id = target_stream.session_id
-    outbound_message.processed_plain_text = processed_plain_text.strip() or _build_processed_plain_text(outbound_message)
+    outbound_message.processed_plain_text = processed_plain_text.strip() or _build_processed_plain_text(
+        outbound_message
+    )
     outbound_message.reply_to = anchor_message.message_id if anchor_message is not None else None
     message_flags = _detect_outbound_message_flags(outbound_message.raw_message)
     outbound_message.is_emoji = message_flags["is_emoji"]
@@ -581,7 +583,42 @@ def _build_outbound_session_message(
     return outbound_message
 
 
-def _ensure_reply_component(message: SessionMessage, reply_message_id: str) -> None:
+def _build_reply_component(reply_message_id: str, reply_message: Optional[MaiMessage]) -> ReplyComponent:
+    """根据被引用消息构造包含预览信息的回复组件。"""
+    if reply_message is None or reply_message.message_id != reply_message_id:
+        return ReplyComponent(target_message_id=reply_message_id)
+
+    user_info = reply_message.message_info.user_info
+    return ReplyComponent(
+        target_message_id=reply_message_id,
+        target_message_content=reply_message.processed_plain_text or "",
+        target_message_sender_id=user_info.user_id,
+        target_message_sender_nickname=user_info.user_nickname,
+        target_message_sender_cardname=user_info.user_cardname,
+    )
+
+
+def _fill_reply_component(component: ReplyComponent, reply_message: Optional[MaiMessage]) -> None:
+    """补齐已存在回复组件中的目标消息预览信息。"""
+    if reply_message is None or reply_message.message_id != component.target_message_id:
+        return
+
+    user_info = reply_message.message_info.user_info
+    if not component.target_message_content:
+        component.target_message_content = reply_message.processed_plain_text or ""
+    if not component.target_message_sender_id:
+        component.target_message_sender_id = user_info.user_id
+    if not component.target_message_sender_nickname:
+        component.target_message_sender_nickname = user_info.user_nickname
+    if not component.target_message_sender_cardname:
+        component.target_message_sender_cardname = user_info.user_cardname
+
+
+def _ensure_reply_component(
+    message: SessionMessage,
+    reply_message_id: str,
+    reply_message: Optional[MaiMessage] = None,
+) -> None:
     """为消息补充回复组件。
 
     Args:
@@ -591,9 +628,10 @@ def _ensure_reply_component(message: SessionMessage, reply_message_id: str) -> N
     if message.raw_message.components:
         first_component = message.raw_message.components[0]
         if isinstance(first_component, ReplyComponent) and first_component.target_message_id == reply_message_id:
+            _fill_reply_component(first_component, reply_message)
             return
 
-    message.raw_message.components.insert(0, ReplyComponent(target_message_id=reply_message_id))
+    message.raw_message.components.insert(0, _build_reply_component(reply_message_id, reply_message))
 
 
 async def _prepare_message_for_platform_io(
@@ -602,6 +640,7 @@ async def _prepare_message_for_platform_io(
     typing: bool,
     set_reply: bool,
     reply_message_id: Optional[str],
+    reply_message: Optional[MaiMessage] = None,
 ) -> None:
     """为 Platform IO 发送链预处理消息。
 
@@ -617,7 +656,7 @@ async def _prepare_message_for_platform_io(
     if set_reply:
         if not reply_message_id:
             raise ValueError("set_reply=True 时必须提供 reply_message_id")
-        _ensure_reply_component(message, reply_message_id)
+        _ensure_reply_component(message, reply_message_id, reply_message)
 
     if set_reply or not message.processed_plain_text:
         message.processed_plain_text = _build_processed_plain_text(message)
@@ -629,13 +668,13 @@ async def _prepare_message_for_platform_io(
         await asyncio.sleep(typing_time)
 
 
-def _store_sent_message(message: SessionMessage) -> None:
+async def _store_sent_message(message: SessionMessage) -> None:
     """将已成功发送的消息写入数据库。
 
     Args:
         message: 已成功发送的内部消息对象。
     """
-    MessageUtils.store_message_to_db(message)
+    await MessageUtils.store_message_to_db_async(message)
 
 
 async def _apply_successful_delivery_receipt(message: SessionMessage, delivery_batch: DeliveryBatch) -> None:
@@ -708,6 +747,26 @@ async def _notify_memory_automation_on_message_sent(message: SessionMessage) -> 
         logger.warning(f"[{session_id}] 长期记忆人物事实写回注册失败: {exc}")
 
 
+def _record_sent_emoji_usage(message: SessionMessage) -> None:
+    """在消息真实发送成功后记录其中表情包的使用次数。"""
+
+    emoji_hashes = [
+        component.binary_hash.strip()
+        for component in message.raw_message.components
+        if isinstance(component, EmojiComponent) and component.binary_hash.strip()
+    ]
+    if not emoji_hashes:
+        return
+
+    try:
+        from src.emoji_system.emoji_manager import emoji_manager
+
+        for emoji_hash in emoji_hashes:
+            emoji_manager.update_emoji_usage_by_hash(emoji_hash, log_missing=False)
+    except Exception as exc:
+        logger.warning(f"[SendService] 记录表情包使用次数失败: {exc}")
+
+
 def _sync_sent_message_to_maisaka_history(
     message: SessionMessage,
     *,
@@ -736,10 +795,13 @@ def _log_platform_io_failures(delivery_batch: DeliveryBatch) -> None:
     Args:
         delivery_batch: Platform IO 返回的批量回执。
     """
-    failed_details = "; ".join(
-        f"driver={receipt.driver_id} status={receipt.status} error={receipt.error}"
-        for receipt in delivery_batch.failed_receipts
-    ) or "未命中任何发送路由"
+    failed_details = (
+        "; ".join(
+            f"driver={receipt.driver_id} status={receipt.status} error={receipt.error}"
+            for receipt in delivery_batch.failed_receipts
+        )
+        or "未命中任何发送路由"
+    )
     logger.warning(f"[SendService] Platform IO 发送失败: platform={delivery_batch.route_key.platform} {failed_details}")
 
 
@@ -749,6 +811,7 @@ async def _send_via_platform_io(
     typing: bool,
     set_reply: bool,
     reply_message_id: Optional[str],
+    reply_message: Optional[MaiMessage] = None,
     storage_message: bool,
     show_log: bool,
 ) -> Optional[SessionMessage]:
@@ -806,6 +869,7 @@ async def _send_via_platform_io(
             typing=typing,
             set_reply=set_reply,
             reply_message_id=reply_message_id,
+            reply_message=reply_message,
         )
         delivery_batch = await platform_io_manager.send_message(
             message,
@@ -833,14 +897,12 @@ async def _send_via_platform_io(
     )
 
     if delivery_batch.has_success:
+        _record_sent_emoji_usage(message)
         if storage_message:
-            _store_sent_message(message)
+            await _store_sent_message(message)
         await _notify_memory_automation_on_message_sent(message)
         if show_log:
-            successful_driver_ids = [
-                receipt.driver_id or "unknown"
-                for receipt in delivery_batch.sent_receipts
-            ]
+            successful_driver_ids = [receipt.driver_id or "unknown" for receipt in delivery_batch.sent_receipts]
             logger.info(
                 f"[SendService] 已通过 Platform IO 将消息发往平台 '{route_key.platform}' "
                 f"(drivers: {', '.join(successful_driver_ids)}) "
@@ -858,6 +920,7 @@ async def send_session_message_with_message(
     typing: bool = False,
     set_reply: bool = False,
     reply_message_id: Optional[str] = None,
+    reply_message: Optional[MaiMessage] = None,
     storage_message: bool = True,
     show_log: bool = True,
     sync_to_maisaka_history: bool = False,
@@ -873,6 +936,7 @@ async def send_session_message_with_message(
         typing=typing,
         set_reply=set_reply,
         reply_message_id=reply_message_id,
+        reply_message=reply_message,
         storage_message=storage_message,
         show_log=show_log,
     )
@@ -890,6 +954,7 @@ async def send_session_message(
     typing: bool = False,
     set_reply: bool = False,
     reply_message_id: Optional[str] = None,
+    reply_message: Optional[MaiMessage] = None,
     storage_message: bool = True,
     show_log: bool = True,
     sync_to_maisaka_history: bool = False,
@@ -924,6 +989,7 @@ async def send_session_message(
             typing=typing,
             set_reply=set_reply,
             reply_message_id=reply_message_id,
+            reply_message=reply_message,
             storage_message=storage_message,
             show_log=show_log,
             sync_to_maisaka_history=sync_to_maisaka_history,
@@ -1037,6 +1103,7 @@ async def _send_to_target_with_message(
             typing=typing,
             set_reply=set_reply,
             reply_message_id=reply_message.message_id if reply_message is not None else None,
+            reply_message=reply_message,
             storage_message=storage_message,
             show_log=show_log,
             sync_to_maisaka_history=sync_to_maisaka_history,

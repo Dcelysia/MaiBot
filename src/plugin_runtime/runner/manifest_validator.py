@@ -4,14 +4,12 @@
 以及插件依赖/Python 包依赖的解析逻辑。
 """
 
+import json
+import re
 from functools import lru_cache
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Annotated, Any, Dict, Iterable, List, Literal, Optional, Set, Tuple, Union
-
-import json
-import re
-import tomllib
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -20,6 +18,7 @@ from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from src.common.logger import get_logger
+from src.plugin_runtime import detect_host_application_version
 
 logger = get_logger("plugin_runtime.runner.manifest_validator")
 
@@ -27,6 +26,16 @@ _SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 _PLUGIN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)+$")
 _PACKAGE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _HTTP_URL_PATTERN = re.compile(r"^https?://.+$")
+_ICON_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_HEX_COLOR_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_LOCAL_ICON_SUFFIXES = {".jpg", ".jpeg", ".png", ".svg", ".webp"}
+_RESERVED_PLUGIN_DIRECTORY_NAMES = {"data", "__pycache__"}  # 条目需为 casefold 形式
+
+
+def is_reserved_plugin_directory(path: Path) -> bool:
+    """判断 plugins/ 子目录是否为保留目录：data、__pycache__（不区分大小写）及 ``.`` 开头的隐藏目录。"""
+    name = path.name.casefold()
+    return name in _RESERVED_PLUGIN_DIRECTORY_NAMES or name.startswith(".")
 
 
 class VersionComparator:
@@ -47,6 +56,15 @@ class VersionComparator:
             return "0.0.0"
 
         normalized = re.sub(r"-snapshot\.\d+", "", str(version).strip())
+        try:
+            parsed_version = Version(normalized)
+            parts = [str(part) for part in parsed_version.release[:3]]
+            while len(parts) < 3:
+                parts.append("0")
+            return ".".join(parts)
+        except InvalidVersion:
+            pass
+
         if not re.match(r"^\d+(\.\d+){0,2}$", normalized):
             return "0.0.0"
 
@@ -121,6 +139,25 @@ class VersionComparator:
         return True, ""
 
     @staticmethod
+    def is_same_major_higher_version(version: str, max_version: str) -> bool:
+        """判断版本是否仅在同一主版本内高于声明上限。
+
+        Args:
+            version: 当前版本号。
+            max_version: Manifest 声明的最大支持版本号。
+
+        Returns:
+            bool: 当前版本高于上限且两者主版本号相同时返回 ``True``。
+        """
+
+        if not version or not max_version:
+            return False
+
+        current_major, _current_minor, _current_patch = VersionComparator.parse_version(version)
+        max_major, _max_minor, _max_patch = VersionComparator.parse_version(max_version)
+        return current_major == max_major and VersionComparator.compare(version, max_version) > 0
+
+    @staticmethod
     def is_valid_semver(version: str) -> bool:
         """判断字符串是否为严格三段式语义版本号。
 
@@ -131,6 +168,17 @@ class VersionComparator:
             bool: 是否满足 ``X.Y.Z`` 格式。
         """
         return bool(_SEMVER_PATTERN.fullmatch(str(version or "").strip()))
+
+    @staticmethod
+    def is_valid_project_version(version: str) -> bool:
+        """判断主程序或 SDK 的项目版本号是否可被解析。
+
+        ``pyproject.toml`` 遵循 Python 包版本规范，允许 ``1.0.0rc16`` 或
+        ``1.0.0-pre.16`` 这类预发布版本；兼容性比较时只取其 release 部分。
+        """
+
+        normalized = VersionComparator.normalize_version(version)
+        return normalized != "0.0.0" or str(version or "").strip() == "0.0.0"
 
 
 class _StrictManifestModel(BaseModel):
@@ -491,6 +539,73 @@ ManifestDependencyDefinition = Annotated[
 ]
 
 
+class ManifestDisplayIcon(_StrictManifestModel):
+    """插件展示图标声明。"""
+
+    type: Literal["lucide", "emoji", "local"] = Field(description="图标类型")
+    value: str = Field(description="图标值")
+    fallback: Optional[str] = Field(default=None, description="图标加载失败时使用的 lucide 图标名")
+    background: Optional[str] = Field(default=None, description="图标背景色，格式为 #RRGGBB")
+
+    @field_validator("value")
+    @classmethod
+    def _validate_value(cls, value: str) -> str:
+        """校验图标值不能为空。"""
+        normalized_value = str(value or "").strip()
+        if not normalized_value:
+            raise ValueError("图标值不能为空")
+        return normalized_value
+
+    @field_validator("fallback")
+    @classmethod
+    def _validate_fallback(cls, value: Optional[str]) -> Optional[str]:
+        """校验 fallback 图标名。"""
+        if value is None:
+            return None
+        normalized_value = str(value or "").strip()
+        if not normalized_value:
+            raise ValueError("fallback 不能为空")
+        if not _ICON_NAME_PATTERN.fullmatch(normalized_value):
+            raise ValueError("fallback 只能包含字母、数字、下划线和横线")
+        return normalized_value
+
+    @field_validator("background")
+    @classmethod
+    def _validate_background(cls, value: Optional[str]) -> Optional[str]:
+        """校验图标背景色。"""
+        if value is None:
+            return None
+        normalized_value = str(value or "").strip()
+        if not _HEX_COLOR_PATTERN.fullmatch(normalized_value):
+            raise ValueError("background 必须为 #RRGGBB 格式")
+        return normalized_value
+
+    @model_validator(mode="after")
+    def _validate_icon_value_by_type(self) -> "ManifestDisplayIcon":
+        """按图标类型校验 value。"""
+        if self.type == "lucide":
+            if not _ICON_NAME_PATTERN.fullmatch(self.value):
+                raise ValueError("lucide 图标名只能包含字母、数字、下划线和横线")
+            return self
+
+        if self.type == "local":
+            icon_path = Path(self.value)
+            if icon_path.is_absolute() or any(part == ".." for part in icon_path.parts):
+                raise ValueError("local 图标路径必须是插件目录内的相对路径")
+            if "\x00" in self.value or self.value.startswith(("/", "\\")):
+                raise ValueError("local 图标路径包含非法字符")
+            if icon_path.suffix.lower() not in _LOCAL_ICON_SUFFIXES:
+                raise ValueError("local 图标仅支持 jpg、jpeg、png、svg、webp")
+
+        return self
+
+
+class ManifestDisplay(_StrictManifestModel):
+    """插件展示元信息。"""
+
+    icon: Optional[ManifestDisplayIcon] = Field(default=None, description="插件展示图标")
+
+
 class PluginManifest(_StrictManifestModel):
     """插件 Manifest v2 强类型模型。"""
 
@@ -511,6 +626,8 @@ class PluginManifest(_StrictManifestModel):
     capabilities: List[str] = Field(description="插件声明的能力请求")
     i18n: ManifestI18n = Field(description="国际化配置")
     id: str = Field(description="稳定插件 ID")
+    plugin_type: str = Field(default="extension", description="插件类型")
+    display: Optional[ManifestDisplay] = Field(default=None, description="插件展示元信息")
 
     @field_validator("version")
     @classmethod
@@ -637,9 +754,7 @@ class PluginManifest(_StrictManifestModel):
             List[PythonPackageDependencyDefinition]: 所有 ``type=python_package`` 的依赖项。
         """
         return [
-            dependency
-            for dependency in self.dependencies
-            if isinstance(dependency, PythonPackageDependencyDefinition)
+            dependency for dependency in self.dependencies if isinstance(dependency, PythonPackageDependencyDefinition)
         ]
 
     @property
@@ -665,6 +780,7 @@ class ManifestValidator:
     """严格的插件 Manifest v2 校验器。"""
 
     SUPPORTED_MANIFEST_VERSIONS = [2]
+    _LOGGED_WARNING_KEYS: Set[Tuple[str, str]] = set()
 
     def __init__(
         self,
@@ -672,6 +788,7 @@ class ManifestValidator:
         sdk_version: str = "",
         project_root: Optional[Path] = None,
         validate_python_package_dependencies: bool = True,
+        log_compat_warnings: bool = True,
     ) -> None:
         """初始化 Manifest 校验器。
 
@@ -680,11 +797,13 @@ class ManifestValidator:
             sdk_version: 当前 SDK 版本号；留空时自动从运行环境中探测。
             project_root: 项目根目录；留空时自动推断。
             validate_python_package_dependencies: 是否校验 Python 包依赖与当前环境的关系。
+            log_compat_warnings: 是否输出兼容模式提示；预扫描场景可关闭以避免重复日志。
         """
         self._project_root: Path = project_root or self._resolve_project_root()
         self._host_version: str = host_version or self._detect_default_host_version(self._project_root)
         self._sdk_version: str = sdk_version or self._detect_default_sdk_version(self._project_root)
         self._validate_python_package_dependencies: bool = validate_python_package_dependencies
+        self._log_compat_warnings: bool = log_compat_warnings
         self.errors: List[str] = []
         self.warnings: List[str] = []
 
@@ -699,7 +818,7 @@ class ManifestValidator:
         """
         return self.parse_manifest(manifest) is not None
 
-    def parse_manifest(self, manifest: Dict[str, Any]) -> Optional[PluginManifest]:
+    def parse_manifest(self, manifest: Dict[str, Any], source: Optional[str] = None) -> Optional[PluginManifest]:
         """解析并校验 manifest 字典。
 
         Args:
@@ -711,17 +830,27 @@ class ManifestValidator:
         self.errors.clear()
         self.warnings.clear()
 
+        manifest_version = manifest.get("manifest_version")
+        if manifest_version not in self.SUPPORTED_MANIFEST_VERSIONS:
+            supported_versions = ", ".join(str(version) for version in self.SUPPORTED_MANIFEST_VERSIONS)
+            self.errors.append(
+                f"Manifest 版本不兼容: manifest_version={manifest_version!r}，仅支持 {supported_versions}"
+            )
+            self._log_errors(source=source)
+            return None
+
         try:
             parsed_manifest = PluginManifest.model_validate(manifest)
         except ValidationError as exc:
             self.errors.extend(self._format_validation_errors(exc))
-            self._log_errors()
+            self._log_errors(source=source)
             return None
 
         self._validate_runtime_compatibility(parsed_manifest)
         if self.errors:
-            self._log_errors()
+            self._log_errors(source=source or parsed_manifest.id)
             return None
+        self._log_warnings(source=source or parsed_manifest.id)
 
         return parsed_manifest
 
@@ -743,9 +872,11 @@ class ManifestValidator:
 
         if not manifest_path.is_file():
             self.errors.append("缺少 _manifest.json")
+            self._log_errors(source=str(plugin_path))
             return None
         if require_entrypoint and not entrypoint_path.is_file():
             self.errors.append("缺少 plugin.py")
+            self._log_errors(source=str(plugin_path))
             return None
 
         try:
@@ -753,15 +884,16 @@ class ManifestValidator:
                 manifest_data = json.load(manifest_file)
         except Exception as exc:
             self.errors.append(f"manifest 解析失败: {exc}")
-            self._log_errors()
+            self._log_errors(source=str(plugin_path))
             return None
 
         if not isinstance(manifest_data, dict):
             self.errors.append("manifest 顶层必须为 JSON 对象")
-            self._log_errors()
+            self._log_errors(source=str(plugin_path))
             return None
 
-        return self.parse_manifest(manifest_data)
+        manifest_id = str(manifest_data.get("id") or plugin_path.name).strip() or plugin_path.name
+        return self.parse_manifest(manifest_data, source=manifest_id)
 
     def iter_plugin_manifests(
         self,
@@ -782,7 +914,11 @@ class ManifestValidator:
             if not normalized_root.is_dir():
                 continue
 
-            for candidate_path in sorted(entry.resolve() for entry in normalized_root.iterdir() if entry.is_dir()):
+            for candidate_path in sorted(
+                entry.resolve()
+                for entry in normalized_root.iterdir()
+                if entry.is_dir() and not is_reserved_plugin_directory(entry)
+            ):
                 parsed_manifest = self.load_from_plugin_path(candidate_path, require_entrypoint=require_entrypoint)
                 if parsed_manifest is None:
                     continue
@@ -878,7 +1014,16 @@ class ManifestValidator:
             manifest.host_application.max_version,
         )
         if not host_ok:
-            self.errors.append(f"Host 版本不兼容: {host_message} (当前 Host: {self._host_version})")
+            if VersionComparator.is_same_major_higher_version(
+                self._host_version,
+                manifest.host_application.max_version,
+            ):
+                self.warnings.append(
+                    f"当前版本 {self._host_version} 以兼容模式加载"
+                    f"{VersionComparator.normalize_version(manifest.host_application.max_version)} 版本的插件"
+                )
+            else:
+                self.errors.append(f"Host 版本不兼容: {host_message} (当前 Host: {self._host_version})")
 
         sdk_ok, sdk_message = VersionComparator.is_in_range(
             self._sdk_version,
@@ -903,9 +1048,7 @@ class ManifestValidator:
             normalized_package_name = canonicalize_name(dependency.name)
             package_specifier = self._build_specifier_set(dependency.version_spec)
             if package_specifier is None:
-                self.errors.append(
-                    f"Python 包依赖 {dependency.name} 的版本约束无效: {dependency.version_spec}"
-                )
+                self.errors.append(f"Python 包依赖 {dependency.name} 的版本约束无效: {dependency.version_spec}")
                 continue
 
             installed_version = self._get_installed_package_version(dependency.name)
@@ -993,10 +1136,42 @@ class ManifestValidator:
 
         return cls._requirements_may_overlap(left, right)
 
-    def _log_errors(self) -> None:
+    def _log_errors(self, source: Optional[str] = None) -> None:
         """输出当前累计的 Manifest 校验错误。"""
-        for error_message in self.errors:
-            logger.error(f"Manifest 校验失败: {error_message}")
+        if not self.errors:
+            return
+
+        error_summary = "；".join(self.errors)
+        if source:
+            logger.error(f"Manifest 校验失败 [{source}]: 共 {len(self.errors)} 项，{error_summary}")
+            return
+        logger.error(f"Manifest 校验失败: 共 {len(self.errors)} 项，{error_summary}")
+
+    def _log_warnings(self, source: Optional[str] = None) -> None:
+        """输出当前累计的 Manifest 兼容性提示。"""
+        if not self._log_compat_warnings:
+            return
+        if not self.warnings:
+            return
+
+        source_key = source or ""
+        pending_warnings = [
+            warning for warning in self.warnings if (source_key, warning) not in self._LOGGED_WARNING_KEYS
+        ]
+        if not pending_warnings:
+            return
+
+        for warning in pending_warnings:
+            self._LOGGED_WARNING_KEYS.add((source_key, warning))
+
+        warning_summary = "；".join(pending_warnings)
+        if source:
+            if len(pending_warnings) < 2:
+                logger.info(f"插件 [{source}]: {warning_summary}")
+            else:
+                logger.info(f"插件 [{source}]: 共 {len(pending_warnings)} 项，{warning_summary}")
+            return
+        logger.info(f"插件: 共 {len(pending_warnings)} 项，{warning_summary}")
 
     @classmethod
     def _resolve_project_root(cls) -> Path:
@@ -1018,19 +1193,8 @@ class ManifestValidator:
         Returns:
             str: 探测到的 Host 版本号；失败时返回空字符串。
         """
-        pyproject_path = project_root / "pyproject.toml"
-        try:
-            with pyproject_path.open("rb") as pyproject_file:
-                pyproject_data = tomllib.load(pyproject_file)
-        except Exception:
-            return ""
-
-        project_data = pyproject_data.get("project", {})
-        if not isinstance(project_data, dict):
-            return ""
-
-        raw_version = str(project_data.get("version", "") or "").strip()
-        if VersionComparator.is_valid_semver(raw_version):
+        raw_version = detect_host_application_version(project_root)
+        if VersionComparator.is_valid_project_version(raw_version):
             return raw_version
         return ""
 
@@ -1047,7 +1211,7 @@ class ManifestValidator:
         """
         try:
             raw_version = importlib_metadata.version("maibot-plugin-sdk")
-            if VersionComparator.is_valid_semver(raw_version):
+            if VersionComparator.is_valid_project_version(raw_version):
                 return raw_version
         except importlib_metadata.PackageNotFoundError:
             pass
@@ -1064,7 +1228,7 @@ class ManifestValidator:
             return ""
 
         raw_version = str(project_data.get("version", "") or "").strip()
-        if VersionComparator.is_valid_semver(raw_version):
+        if VersionComparator.is_valid_project_version(raw_version):
             return raw_version
         return ""
 
@@ -1170,7 +1334,9 @@ class ManifestValidator:
         """
         candidate_versions = cls._build_candidate_versions(left, right)
         for candidate_version in candidate_versions:
-            if left.contains(candidate_version, prereleases=True) and right.contains(candidate_version, prereleases=True):
+            if left.contains(candidate_version, prereleases=True) and right.contains(
+                candidate_version, prereleases=True
+            ):
                 return True
         return False
 

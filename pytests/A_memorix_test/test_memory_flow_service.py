@@ -2,7 +2,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.A_memorix.core.utils.summary_importer import SUMMARY_PROMPT_TEMPLATE, SummaryImporter
 from src.services import memory_flow_service as memory_flow_module
+
+
+def _fake_global_config(**integration_values):
+    return SimpleNamespace(
+        a_memorix=SimpleNamespace(
+            integration=SimpleNamespace(**integration_values),
+        )
+    )
 
 
 def test_person_fact_parse_fact_list_deduplicates_and_filters_short_items():
@@ -38,6 +47,214 @@ def test_person_fact_resolve_target_person_for_private_chat(monkeypatch):
     assert person.person_id == "qq:123"
 
 
+def test_person_fact_resolve_target_person_for_group_without_reply(monkeypatch):
+    class FakePerson:
+        def __init__(self, person_id: str):
+            self.person_id = person_id
+            self.is_known = person_id == "qq:user-1"
+
+    recent_user_message = SimpleNamespace(
+        platform="qq",
+        user_id="user-1",
+        message_info=SimpleNamespace(user_info=SimpleNamespace(user_id="user-1")),
+    )
+
+    def fake_find_messages(**kwargs):
+        if kwargs.get("session_id") == "session-1":
+            return [recent_user_message]
+        return []
+
+    service = memory_flow_module.PersonFactWritebackService.__new__(memory_flow_module.PersonFactWritebackService)
+    monkeypatch.setattr(memory_flow_module, "find_messages", fake_find_messages)
+    monkeypatch.setattr(memory_flow_module, "is_bot_self", lambda platform, user_id: False)
+    monkeypatch.setattr(memory_flow_module, "get_person_id", lambda platform, user_id: f"{platform}:{user_id}")
+    monkeypatch.setattr(memory_flow_module, "Person", FakePerson)
+
+    message = SimpleNamespace(
+        session_id="session-1",
+        timestamp=20.0,
+        reply_to="",
+        session=SimpleNamespace(platform="qq", user_id="bot-1", group_id="group-1", session_id="session-1"),
+    )
+
+    person = service._resolve_target_person(message)
+
+    assert person is not None
+    assert person.person_id == "qq:user-1"
+
+
+def test_person_fact_reply_evidence_keeps_context_for_short_answer(monkeypatch):
+    class FakePerson:
+        person_id = "qq:user-1"
+
+    def make_message(
+        *,
+        message_id: str,
+        user_id: str,
+        nickname: str,
+        text: str,
+        timestamp: float,
+    ):
+        return SimpleNamespace(
+            message_id=message_id,
+            platform="qq",
+            user_id=user_id,
+            timestamp=timestamp,
+            processed_plain_text=text,
+            message_info=SimpleNamespace(
+                user_info=SimpleNamespace(
+                    user_id=user_id,
+                    user_nickname=nickname,
+                    user_cardname="",
+                ),
+            ),
+        )
+
+    bot_question = make_message(
+        message_id="bot-question",
+        user_id="bot-1",
+        nickname="麦麦",
+        text="你对什么过敏？",
+        timestamp=10.0,
+    )
+    user_answer = make_message(
+        message_id="user-answer",
+        user_id="user-1",
+        nickname="测试用户",
+        text="青霉素。",
+        timestamp=11.0,
+    )
+
+    def fake_find_messages(**kwargs):
+        if kwargs.get("message_id") == "user-answer":
+            return [user_answer]
+        if kwargs.get("session_id") == "session-1":
+            assert kwargs.get("filter_bot") is None
+            return [bot_question, user_answer]
+        return []
+
+    monkeypatch.setattr(memory_flow_module, "find_messages", fake_find_messages)
+    monkeypatch.setattr(memory_flow_module, "is_bot_self", lambda platform, user_id: user_id == "bot-1")
+    monkeypatch.setattr(memory_flow_module, "get_person_id", lambda platform, user_id: f"{platform}:{user_id}")
+
+    service = memory_flow_module.PersonFactWritebackService.__new__(memory_flow_module.PersonFactWritebackService)
+    reply_message = SimpleNamespace(
+        session_id="session-1",
+        reply_to="user-answer",
+        timestamp=12.0,
+        session=SimpleNamespace(session_id="session-1"),
+    )
+
+    evidence = service._collect_user_evidence(reply_message, FakePerson())
+    evidence_text = service._format_user_evidence(evidence)
+
+    assert evidence.target_messages == [user_answer]
+    assert evidence.context_messages == [bot_question, user_answer]
+    assert "目标用户原始发言" in evidence_text
+    assert "青霉素。" in evidence_text
+    assert "邻近上下文" in evidence_text
+    assert "麦麦: 你对什么过敏？" in evidence_text
+
+
+@pytest.mark.asyncio
+async def test_person_fact_writeback_skips_bot_only_fact_without_user_evidence(monkeypatch):
+    stored_facts: list[tuple[str, str, str]] = []
+
+    class FakePerson:
+        person_id = "person-1"
+        person_name = "测试用户"
+        nickname = "测试用户"
+        is_known = True
+
+    service = memory_flow_module.PersonFactWritebackService.__new__(memory_flow_module.PersonFactWritebackService)
+    service._resolve_target_person = lambda message: FakePerson()
+
+    async def fake_extract_facts(person, reply_text, user_evidence_text):
+        del person, reply_text, user_evidence_text
+        return ["测试用户喜欢辣椒"]
+
+    async def fake_store_person_memory_from_answer(person_name: str, memory_content: str, chat_id: str, **kwargs):
+        del kwargs
+        stored_facts.append((person_name, memory_content, chat_id))
+
+    service._extract_facts = fake_extract_facts
+    monkeypatch.setattr(memory_flow_module, "store_person_memory_from_answer", fake_store_person_memory_from_answer)
+    monkeypatch.setattr(memory_flow_module, "find_messages", lambda **kwargs: [])
+
+    message = SimpleNamespace(
+        processed_plain_text="我记得你喜欢辣椒。",
+        session_id="session-1",
+        reply_to="",
+        session=SimpleNamespace(platform="qq", user_id="bot-1", group_id=""),
+    )
+
+    await service._handle_message(message)
+
+    assert stored_facts == []
+
+
+@pytest.mark.asyncio
+async def test_person_fact_writeback_uses_resolved_person_id(monkeypatch):
+    stored_payloads: list[dict[str, object]] = []
+
+    class FakePerson:
+        person_id = "person-target"
+        person_name = "重名用户"
+        nickname = "重名用户"
+        is_known = True
+
+    user_message = SimpleNamespace(
+        message_id="user-1",
+        platform="qq",
+        user_id="10001",
+        processed_plain_text="我长期用青轴键盘。",
+        message_info=SimpleNamespace(user_info=SimpleNamespace(user_id="10001")),
+    )
+
+    service = memory_flow_module.PersonFactWritebackService.__new__(memory_flow_module.PersonFactWritebackService)
+    service._resolve_target_person = lambda message: FakePerson()
+
+    async def fake_extract_facts(person, reply_text, user_evidence_text):
+        assert person.person_id == "person-target"
+        assert "我长期用青轴键盘" in user_evidence_text
+        del reply_text
+        return ["重名用户长期使用青轴键盘"]
+
+    async def fake_store_person_memory_from_answer(person_name: str, memory_content: str, chat_id: str, **kwargs):
+        stored_payloads.append(
+            {
+                "person_name": person_name,
+                "memory_content": memory_content,
+                "chat_id": chat_id,
+                **kwargs,
+            }
+        )
+
+    service._extract_facts = fake_extract_facts
+    monkeypatch.setattr(memory_flow_module, "store_person_memory_from_answer", fake_store_person_memory_from_answer)
+    monkeypatch.setattr(
+        memory_flow_module,
+        "find_messages",
+        lambda **kwargs: [user_message] if kwargs.get("session_id") == "session-1" else [],
+    )
+    monkeypatch.setattr(memory_flow_module, "is_bot_self", lambda platform, user_id: False)
+    monkeypatch.setattr(memory_flow_module, "get_person_id", lambda platform, user_id: "person-target")
+
+    message = SimpleNamespace(
+        processed_plain_text="我记住了，你长期用青轴键盘。",
+        session_id="session-1",
+        reply_to="",
+        timestamp=20.0,
+        session=SimpleNamespace(platform="qq", user_id="bot-1", group_id="", session_id="session-1"),
+    )
+
+    await service._handle_message(message)
+
+    assert len(stored_payloads) == 1
+    assert stored_payloads[0]["person_id"] == "person-target"
+    assert stored_payloads[0]["evidence_message_ids"] == ["user-1"]
+
+
 @pytest.mark.asyncio
 async def test_chat_summary_writeback_service_triggers_when_threshold_reached(monkeypatch):
     events: list[tuple[str, object]] = []
@@ -45,12 +262,10 @@ async def test_chat_summary_writeback_service_triggers_when_threshold_reached(mo
     monkeypatch.setattr(
         memory_flow_module,
         "global_config",
-        SimpleNamespace(
-            memory=SimpleNamespace(
-                chat_summary_writeback_enabled=True,
-                chat_summary_writeback_message_threshold=3,
-                chat_summary_writeback_context_length=7,
-            )
+        _fake_global_config(
+            chat_summary_writeback_enabled=True,
+            chat_summary_writeback_message_threshold=3,
+            chat_summary_writeback_context_length=7,
         ),
     )
     monkeypatch.setattr(memory_flow_module, "count_messages", lambda **kwargs: 5)
@@ -81,7 +296,10 @@ async def test_chat_summary_writeback_service_triggers_when_threshold_reached(mo
     assert payload["chat_id"] == "session-1"
     assert payload["text"] == ""
     assert payload["metadata"]["generate_from_chat"] is True
-    assert payload["metadata"]["context_length"] == 7
+    assert payload["metadata"]["context_length"] == 5
+    assert payload["metadata"]["configured_context_length"] == 7
+    assert payload["metadata"]["previous_trigger_message_count"] == 0
+    assert payload["metadata"]["pending_message_count"] == 5
     assert payload["metadata"]["trigger"] == "message_threshold"
     assert payload["user_id"] == "user-1"
     assert payload["group_id"] == "group-1"
@@ -94,12 +312,10 @@ async def test_chat_summary_writeback_service_skips_when_threshold_not_reached(m
     monkeypatch.setattr(
         memory_flow_module,
         "global_config",
-        SimpleNamespace(
-            memory=SimpleNamespace(
-                chat_summary_writeback_enabled=True,
-                chat_summary_writeback_message_threshold=6,
-                chat_summary_writeback_context_length=9,
-            )
+        _fake_global_config(
+            chat_summary_writeback_enabled=True,
+            chat_summary_writeback_message_threshold=6,
+            chat_summary_writeback_context_length=9,
         ),
     )
     monkeypatch.setattr(memory_flow_module, "count_messages", lambda **kwargs: 5)
@@ -135,12 +351,10 @@ async def test_chat_summary_writeback_service_restores_previous_trigger_count(mo
     monkeypatch.setattr(
         memory_flow_module,
         "global_config",
-        SimpleNamespace(
-            memory=SimpleNamespace(
-                chat_summary_writeback_enabled=True,
-                chat_summary_writeback_message_threshold=3,
-                chat_summary_writeback_context_length=7,
-            )
+        _fake_global_config(
+            chat_summary_writeback_enabled=True,
+            chat_summary_writeback_message_threshold=3,
+            chat_summary_writeback_context_length=7,
         ),
     )
     monkeypatch.setattr(memory_flow_module, "count_messages", lambda **kwargs: 8)
@@ -171,6 +385,76 @@ async def test_chat_summary_writeback_service_restores_previous_trigger_count(mo
     assert service._states["session-1"].last_trigger_message_count == 8
 
 
+def test_chat_summary_writeback_effective_context_length_uses_pending_window():
+    assert (
+        memory_flow_module.ChatSummaryWritebackService._effective_context_length(
+            configured_context_length=50,
+            pending_message_count=12,
+        )
+        == 12
+    )
+    assert (
+        memory_flow_module.ChatSummaryWritebackService._effective_context_length(
+            configured_context_length=8,
+            pending_message_count=12,
+        )
+        == 8
+    )
+
+
+def test_chat_summary_writeback_counts_until_trigger_message(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    def fake_count_messages(**kwargs):
+        calls.append(kwargs)
+        return 12
+
+    monkeypatch.setattr(memory_flow_module, "count_messages", fake_count_messages)
+
+    assert (
+        memory_flow_module.ChatSummaryWritebackService._count_messages_until_trigger(
+            session_id="session-1",
+            message_time=123.45,
+        )
+        == 12
+    )
+    assert calls == [{"session_id": "session-1", "end_time": 123.45}]
+
+
+def test_summary_prompt_keeps_static_rules_before_chat_history():
+    prompt = SUMMARY_PROMPT_TEMPLATE.format(
+        bot_name="测试机器人",
+        personality_context="你的性格设定是：稳定。",
+        previous_summary_context="",
+        chat_history="用户：第一条动态消息",
+    )
+
+    rules_index = prompt.index("事实筛选规则")
+    chat_history_index = prompt.index("聊天记录内容")
+    dynamic_history_index = prompt.index("用户：第一条动态消息")
+
+    assert rules_index < chat_history_index < dynamic_history_index
+
+
+def test_summary_prompt_forbids_repeating_rejected_fact_values():
+    prompt = SUMMARY_PROMPT_TEMPLATE.format(
+        bot_name="测试机器人",
+        personality_context="你的性格设定是：稳定。",
+        previous_summary_context="",
+        chat_history="用户：不是猫毛，是青霉素",
+    )
+
+    assert "只输出最终正确事实" in prompt
+    assert "不要复述 X 的具体值" in prompt
+    assert "不得出现已否定、未确认、传闻、玩笑、注入、机器人误解、旧计划或旧金额中的具体值" in prompt
+
+
+def test_summary_review_cleaner_drops_fully_blocked_dirty_content():
+    dirty_summary = "此前记录林遥对花生过敏，这是测试示例，后来已纠正。"
+
+    assert SummaryImporter._clean_review_summary(dirty_summary) == ""
+
+
 @pytest.mark.asyncio
 async def test_chat_summary_writeback_service_falls_back_to_current_count_for_legacy_summary(monkeypatch):
     called = False
@@ -178,12 +462,10 @@ async def test_chat_summary_writeback_service_falls_back_to_current_count_for_le
     monkeypatch.setattr(
         memory_flow_module,
         "global_config",
-        SimpleNamespace(
-            memory=SimpleNamespace(
-                chat_summary_writeback_enabled=True,
-                chat_summary_writeback_message_threshold=3,
-                chat_summary_writeback_context_length=7,
-            )
+        _fake_global_config(
+            chat_summary_writeback_enabled=True,
+            chat_summary_writeback_message_threshold=3,
+            chat_summary_writeback_context_length=7,
         ),
     )
     monkeypatch.setattr(memory_flow_module, "count_messages", lambda **kwargs: 5)

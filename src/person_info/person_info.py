@@ -1,11 +1,11 @@
 from datetime import datetime
-from typing import Optional, Union
+from typing import List, Optional, Union
+
+from sqlmodel import col, select
 
 import hashlib
 import json
 import time
-
-from sqlmodel import col, select
 
 from src.chat.message_receive.chat_manager import chat_manager as _chat_manager
 from src.common.data_models.person_info_data_model import dump_group_cardname_records, parse_group_cardname_json
@@ -506,7 +506,15 @@ class Person:
             logger.error(f"同步用户 {self.person_id} 信息到数据库时出错: {e}")
 
 
-async def store_person_memory_from_answer(person_name: str, memory_content: str, chat_id: str) -> None:
+async def store_person_memory_from_answer(
+    person_name: str,
+    memory_content: str,
+    chat_id: str,
+    *,
+    person_id: str = "",
+    evidence_source: str = "user_supported",
+    evidence_message_ids: Optional[List[str]] = None,
+) -> None:
     """将人物事实写入长期记忆系统。
 
     Args:
@@ -525,6 +533,7 @@ async def store_person_memory_from_answer(person_name: str, memory_content: str,
         return
 
     clean_person_name = str(person_name or "").strip()
+    clean_person_id = person_id.strip()
     try:
         # 从 chat_id 获取 session
         session = _chat_manager.get_session_by_session_id(clean_chat_id)
@@ -536,7 +545,7 @@ async def store_person_memory_from_answer(person_name: str, memory_content: str,
         session_user_id = str(getattr(session, "user_id", "") or "").strip()
         session_group_id = str(getattr(session, "group_id", "") or "").strip()
 
-        person_id = resolve_person_id_for_memory(
+        person_id = clean_person_id or resolve_person_id_for_memory(
             person_name=clean_person_name,
             platform=session_platform,
             user_id=session_user_id,
@@ -569,6 +578,8 @@ async def store_person_memory_from_answer(person_name: str, memory_content: str,
                 "person_id": person_id,
                 "person_name": participant_name,
                 "writeback_source": "memory_flow_service",
+                "evidence_source": str(evidence_source or "user_supported"),
+                "evidence_message_ids": evidence_message_ids or [],
             },
             respect_filter=True,
             user_id=session_user_id,

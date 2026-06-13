@@ -17,9 +17,42 @@ export interface HostApplication {
   max_version?: string
 }
 
+export type PluginType =
+  | 'adapter'
+  | 'chat'
+  | 'creative'
+  | 'provider'
+  | 'management'
+  | 'search'
+  | 'knowledge'
+  | 'media'
+  | 'game'
+  | 'security'
+  | 'automation'
+  | 'extension'
+  | 'other'
+
+export interface PluginDisplayIcon {
+  type: 'lucide' | 'emoji' | 'local'
+  value: string
+  fallback?: string
+  background?: string
+}
+
+export interface PluginDisplay {
+  icon?: PluginDisplayIcon
+}
+
+export interface PluginAssets {
+  /** 插件市场缓存的 64x64 图标资源地址 */
+  icon_64?: string
+}
+
 export interface PluginManifest {
   /** 清单文件版本 */
   manifest_version: number
+  /** Manifest 声明的插件唯一标识 */
+  id?: string
   /** 插件名称 */
   name: string
   /** 插件版本 */
@@ -45,8 +78,10 @@ export interface PluginManifest {
   }
   /** 插件关键词 */
   keywords: string[]
-  /** 插件分类（可选） */
-  categories?: string[]
+  /** 插件类型 */
+  plugin_type?: PluginType | string
+  /** 插件展示元信息 */
+  display?: PluginDisplay
   /** 插件默认语言 */
   default_locale: string
   /** 插件语言文件夹（可选） */
@@ -60,8 +95,16 @@ export interface PluginManifest {
 export interface PluginInfo {
   /** 插件唯一标识 */
   id: string
+  /** 插件仓库索引中的 ID，用于兼容旧统计数据 */
+  marketplace_id?: string
+  /** 统计服务可能使用的 ID 别名 */
+  stats_ids?: string[]
+  /** 插件市场清单中的原始顺序，用于在缺少发布时间时推断较新的插件 */
+  marketplace_order?: number
   /** 插件清单 */
   manifest: PluginManifest
+  /** 插件市场生成的派生资源 */
+  assets?: PluginAssets
   /** 下载量 */
   downloads: number
   /** 评分 (0-5) */
@@ -85,30 +128,6 @@ export interface PluginInfo {
   /** 插件来源：plugin-repo 市场或本地已安装插件 */
   source?: 'market' | 'local'
 }
-
-/**
- * 插件分类
- */
-export const PluginCategory = {
-  /** 开发工具 */
-  DEVELOPER_TOOLS: 'Developer Tools',
-  /** AI 增强 */
-  AI_ENHANCEMENT: 'AI Enhancement',
-  /** 工具类 */
-  UTILITY: 'Utility',
-  /** 娱乐 */
-  ENTERTAINMENT: 'Entertainment',
-  /** 集成 */
-  INTEGRATION: 'Integration',
-  /** 数据分析 */
-  DATA_ANALYSIS: 'Data Analysis',
-  /** 自动化 */
-  AUTOMATION: 'Automation',
-  /** 其他 */
-  OTHER: 'Other',
-} as const
-
-export type PluginCategoryType = typeof PluginCategory[keyof typeof PluginCategory]
 
 /**
  * 插件状态

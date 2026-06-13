@@ -3,6 +3,7 @@ import inspect
 import types
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Any, ClassVar, Dict, List, Literal, Set, Tuple, Union, cast, get_args, get_origin
@@ -62,10 +63,15 @@ class AttrDocBase:
         # 读取文件内容并以 UTF-8 编码返回
         return Path(class_file).read_text(encoding="utf-8")
 
+    @staticmethod
+    @lru_cache(maxsize=None)
+    def _parse_class_source(class_source: str) -> ast.Module:
+        return ast.parse(class_source)
+
     @classmethod
     def _find_class_node(cls, class_source: str) -> ast.ClassDef:
         """在源代码中找到类定义的AST节点"""
-        tree = ast.parse(class_source)
+        tree = cls._parse_class_source(class_source)
         # 遍历 AST 中的所有节点
         for node in ast.walk(tree):
             # 查找类定义节点，且类名与当前类名匹配
@@ -134,7 +140,7 @@ class ConfigBase(BaseModel, AttrDocBase):
     # UI 分组元数据：子类可覆盖以声明所属 Tab 分组
     __ui_parent__: ClassVar[str] = ""  # 父配置类在 Config 中的字段名，空表示独立 Tab
     __ui_label__: ClassVar[str] = ""  # Tab 显示名称（仅做 Tab 主人时使用），空则使用 classDoc
-    __ui_icon__: ClassVar[str] = ""  # Tab 图标名称（Lucide 图标名）
+    __ui_advanced__: ClassVar[bool] = False  # 是否默认收起到 WebUI 配置页的“更多”Tab 中
 
     @classmethod
     def from_dict(cls, attribute_data: AttributeData, data: dict[str, Any]):

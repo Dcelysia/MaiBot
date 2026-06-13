@@ -14,6 +14,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from src.common.logger import get_logger
 from src.config.config import CONFIG_DIR
 from src.config.model_configs import APIProvider
+from src.llm_models.model_client import ensure_client_type_loaded
+from src.llm_models.model_client.base_client import client_registry
 from src.llm_models.openai_compat import build_openai_compatible_client_config, normalize_openai_base_url
 from src.webui.dependencies import require_auth
 from src.webui.utils.network_security import validate_public_url
@@ -34,6 +36,32 @@ MODEL_FETCHER_CONFIG = {
         "parser": "gemini",
     },
 }
+
+
+@router.get("/client-types")
+async def get_registered_client_types():
+    """返回当前主程序与插件已注册的 LLM Provider client_type。"""
+    for client_type in MODEL_FETCHER_CONFIG:
+        ensure_client_type_loaded(client_type)
+
+    client_types = []
+    for registration in client_registry.client_registry.values():
+        client_types.append(
+            {
+                "client_type": registration.client_type,
+                "owner_plugin_id": registration.owner_plugin_id,
+                "version": registration.version,
+                "description": registration.description,
+                "builtin": registration.builtin,
+            }
+        )
+
+    client_types.sort(key=lambda item: (not item["builtin"], item["client_type"]))
+    return {
+        "success": True,
+        "client_types": client_types,
+        "count": len(client_types),
+    }
 
 
 def _normalize_url(url: str) -> str:
@@ -296,6 +324,7 @@ async def get_models_by_url(
 async def test_provider_connection(
     base_url: str = Query(..., description="提供商的基础 URL"),
     api_key: Optional[str] = Query(None, description="API Key（可选，用于验证 Key 有效性）"),
+    client_type: str = Query("openai", description="客户端类型 (openai | gemini)"),
 ):
     """
     测试提供商连接状态
@@ -359,13 +388,19 @@ async def test_provider_connection(
         try:
             start_time = time.time()
             async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                }
+                headers = {"Content-Type": "application/json"}
+                params = {}
+
+                if client_type == "gemini":
+                    # Gemini 使用 URL 参数传递 API Key
+                    params["key"] = api_key
+                else:
+                    # OpenAI 兼容格式使用 Authorization 头
+                    headers["Authorization"] = f"Bearer {api_key}"
+
                 # 尝试获取模型列表
                 models_url = f"{base_url}/models"
-                response = await client.get(models_url, headers=headers)
+                response = await client.get(models_url, headers=headers, params=params)
 
                 if response.status_code == 200:
                     result["api_key_valid"] = True
@@ -408,9 +443,14 @@ async def test_provider_connection_by_name(
 
     base_url = provider.get("base_url", "")
     api_key = provider.get("api_key", "")
+    client_type = provider.get("client_type", "openai")
 
     if not base_url:
         raise HTTPException(status_code=400, detail="提供商配置缺少 base_url")
 
     # 调用测试接口
-    return await test_provider_connection(base_url=base_url, api_key=api_key or None)
+    return await test_provider_connection(
+        base_url=base_url,
+        api_key=api_key if api_key else None,
+        client_type=client_type,
+    )

@@ -2,6 +2,8 @@
   "header": {
     "collapseSidebar": "Collapse sidebar",
     "expandSidebar": "Expand sidebar",
+    "collapseTopbar": "Collapse topbar",
+    "expandTopbar": "Expand topbar",
     "toggleConnection": "Toggle backend connection",
     "viewAnnualSummary": "View annual summary",
     "annualSummary": "2025 Annual Summary",
@@ -12,6 +14,8 @@
     "switchToDark": "Switch to dark mode",
     "logout": "Log out",
     "logoutLabel": "Logout",
+    "switchLanguage": "Switch language",
+    "moreActions": "More actions",
     "notConnected": "Not connected"
   },
   "sidebar": {
@@ -28,10 +32,12 @@
       "aiModelProvider": "AI Model Providers",
       "modelManagement": "Model Management",
       "promptManagement": "Prompt Management",
+      "promptGenerator": "Persona Generator (Experimental)",
       "adapterConfig": "Adapter Config",
       "emojiManagement": "Emoji Management",
       "expressionManagement": "Expression Management",
       "slangManagement": "Slang Management",
+      "behaviorLearning": "Behavior Learning",
       "personInfo": "Person Info",
       "knowledgeGraph": "Long-Term Memory Graph",
       "knowledgeBase": "Long-Term Memory",
@@ -40,6 +46,7 @@
       "pluginConfig": "Plugin Management",
       "mcpSettings": "MCP Settings",
       "logViewer": "Log Viewer",
+      "reasoningProcess": "Reasoning Process",
       "maisakaMonitor": "MaiSaka Chat Monitor",
       "localChat": "Local Chat",
       "settings": "Settings"
@@ -48,7 +55,8 @@
   "workspace": {
     "switcherLabel": "Switch MaiBot workspace",
     "settings": "Mai Settings",
-    "chat": "Mai Chat"
+    "chat": "Mai Chat",
+    "logs": "Mai Logs"
   },
   "chat": {
     "defaultTab": "WebUI",
@@ -63,7 +71,9 @@
     },
     "actions": {
       "cancel": "Cancel",
+      "addImage": "Add image",
       "reconnect": "Reconnect",
+      "removeImage": "Remove image",
       "save": "Save",
       "send": "Send message"
     },
@@ -82,7 +92,7 @@
       "empty": "Start chatting with {{bot}}!",
       "emptyHint": "Type a message below and press Enter to send",
       "errorFallback": "An error occurred",
-      "thinking": "Thinking..."
+      "thinking": "Loading..."
     },
     "composer": {
       "hint": "Enter to send · Shift + Enter for newline"
@@ -140,6 +150,12 @@
       "currentSessionUnavailable": "The current chat session is unavailable. Please try again later.",
       "error": "Error",
       "incompleteConfig": "Incomplete configuration",
+      "imageLimit": "Image limit reached",
+      "imageLimitDesc": "You can send up to {{count}} images at once.",
+      "imageReadFailed": "Failed to read image",
+      "imageReadFailedDesc": "Please choose another image and try again.",
+      "imageUnsupported": "Unsupported file",
+      "imageUnsupportedDesc": "Please choose an image file.",
       "networkError": "Network error",
       "platformFailed": "Failed to load platforms",
       "selectPlatformAndUser": "Please select a platform and user",
@@ -512,7 +528,7 @@
       }
     },
     "loading": {
-      "title": "Loading configuration...",
+      "title": "Loading...",
       "description": "Reading existing configuration"
     },
     "header": {
@@ -626,11 +642,11 @@
         "multipleReplyStyle": {
           "label": "Alternate Reply Styles",
           "placeholder": "Enter one alternate reply style per line",
-          "description": "When this list is not empty, MaiBot may randomly replace the default reply style using the probability below"
+          "description": "When this list is not empty, MaiBot may randomly inject one of these styles as a one-time reply hint"
         },
         "multipleProbability": {
-          "label": "Alternate Style Probability",
-          "description": "The chance of randomly replacing the default reply style each time a reply is built"
+          "label": "Temporary Style Injection Probability",
+          "description": "The chance of injecting a one-time alternate style hint each time a reply is built"
         }
       },
       "emoji": {
@@ -779,6 +795,7 @@
       "modelProviderDesc": "Configure model providers",
       "model": "Model Config",
       "modelDesc": "Configure model parameters",
+      "promptGeneratorDesc": "Generate injectable persona config blocks from text",
       "emoji": "Emoji Management",
       "emojiDesc": "Manage bot emoji",
       "expression": "Expression Management",
@@ -787,12 +804,14 @@
       "personDesc": "Manage person info",
       "jargon": "Slang Management",
       "jargonDesc": "Manage bot learned slang and jargon",
+      "behaviorLearningDesc": "Browse behavior experience paths and retrieval hits",
       "statistics": "Statistics",
       "statisticsDesc": "View usage statistics",
       "plugins": "Plugin Market",
       "pluginsDesc": "Browse and install plugins",
       "logs": "Log Viewer",
       "logsDesc": "View system logs",
+      "reasoningProcessDesc": "Browse Maisaka prompt reasoning logs",
       "settings": "Settings",
       "settingsDesc": "Configure system settings"
     }
@@ -806,8 +825,8 @@
   "home": {
     "title": "Live Monitor",
     "subtitle": "MaiBot runtime status and statistics overview",
-    "loading": "Loading statistics...",
-    "loadingHint": "Fetching MaiBot runtime data",
+    "loading": "Loading...",
+    "loadingHint": "Loading...",
     "timeRange": {
       "24h": "24 Hours",
       "7d": "7 Days",
@@ -816,9 +835,23 @@
     "autoRefresh": "Auto Refresh",
     "botStatus": {
       "title": "MaiBot Status",
+      "loading": "Reading",
       "running": "Running",
       "stopped": "Stopped",
-      "uptime": "Up {{time}}"
+      "unknown": "Unknown",
+      "uptime": "Up {{time}}",
+      "visualEnabled": "Vision enabled",
+      "memoryEnabled": "Memory enabled"
+    },
+    "versionCard": {
+      "title": "MaiBot Version",
+      "mainVersion": "Core version",
+      "webuiVersion": "WebUI version",
+      "latestVersion": "Latest version",
+      "stableLatest": "Latest stable",
+      "testLatest": "Latest test",
+      "githubReleases": "GitHub Releases",
+      "unknown": "Unknown"
     },
     "quickActions": {
       "title": "Quick Actions",
@@ -827,7 +860,63 @@
       "expressionReview": "Expression Review",
       "viewLogs": "View Logs",
       "pluginManage": "Plugins",
-      "systemSettings": "Settings"
+      "systemSettings": "Settings",
+      "pluginConfig": "Plugin Config",
+      "appearanceSettings": "Appearance",
+      "localCache": "Local Cache",
+      "modelProviders": "Model Providers",
+      "modelList": "Model List",
+      "modelTasks": "Model Tasks",
+      "botConfig": "Core Config",
+      "emojiManagement": "Emoji Management",
+      "expressionManagement": "Expression Management",
+      "statistics": "Detailed Statistics",
+      "customize": "Customize",
+      "empty": "No quick shortcuts selected yet",
+      "add": "Add Shortcut",
+      "descriptions": {
+        "restart": "Restart the MaiBot core process",
+        "expressionReview": "Open the expression learning review dialog",
+        "viewLogs": "View WebUI logs",
+        "pluginManage": "Open the plugin marketplace and management page",
+        "systemSettings": "Open system settings",
+        "pluginConfig": "Open installed plugin configuration",
+        "appearanceSettings": "Open Settings / Appearance",
+        "localCache": "Open Settings / Local Cache",
+        "modelProviders": "Open Model Management / Providers",
+        "modelList": "Open Model Management / Models",
+        "modelTasks": "Open Model Management / Task assignments",
+        "botConfig": "Open MaiBot core configuration",
+        "emojiManagement": "Open emoji resource management",
+        "expressionManagement": "Open expression management",
+        "statistics": "Open maibot_statistics.html"
+      },
+      "categories": {
+        "system": "System",
+        "config": "Config",
+        "resource": "Resource",
+        "plugin": "Plugin",
+        "monitor": "Monitor",
+        "external": "External"
+      },
+      "dialog": {
+        "title": "Customize Quick Shortcuts",
+        "description": "Choose the shortcuts shown on the home quick actions card, including page tabs and plugin configuration pages.",
+        "searchPlaceholder": "Search shortcuts, plugins, or tabs...",
+        "loadingPluginEntries": "Loading plugin shortcuts...",
+        "noMatches": "No matching shortcuts found",
+        "restoreDefault": "Restore Defaults",
+        "done": "Done"
+      }
+    },
+    "pluginShortcuts": {
+      "baseLabel": "{{plugin}} Config",
+      "baseDescription": "Open the configuration page for {{plugin}}",
+      "tabDescription": "Open the {{tab}} tab for {{plugin}}",
+      "fallbackLabel": "Plugin config: {{plugin}}",
+      "fallbackTabLabel": "Plugin config: {{plugin}} / {{tab}}",
+      "fallbackDescription": "Open the specified plugin configuration page",
+      "fallbackTabDescription": "Open the specified plugin configuration tab"
     },
     "survey": {
       "title": "Feedback Survey",
@@ -836,6 +925,7 @@
       "maibot": "MaiBot Feedback"
     },
     "stats": {
+      "overviewTitle": "Statistics Overview",
       "totalRequests": "Total Requests",
       "totalCost": "Total Cost",
       "tokenUsage": "Token Usage",
@@ -852,6 +942,21 @@
       "seconds": "sec",
       "hours": "hours",
       "days": "days"
+    },
+    "storage": {
+      "title": "Storage Usage",
+      "reading": "Reading",
+      "summary": "Images {{image}} · Emoji {{emoji}} · Logs {{logs}} · Database {{database}}",
+      "images": "Images",
+      "emoji": "Emoji",
+      "logs": "Logs",
+      "database": "Database",
+      "files": "{{count}} files",
+      "filesAndRecords": "{{files}} files · {{records}} records",
+      "databaseDetail": "{{files}} files · {{tables}} tables",
+      "readingDescription": "Reading local storage usage...",
+      "unavailable": "Local storage usage is unavailable",
+      "manage": "Manage Storage"
     },
     "charts": {
       "tabs": {

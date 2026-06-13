@@ -47,6 +47,7 @@ data_dir = "data/a-memorix"
 [embedding]
 model_name = "auto"
 dimension = 1024
+dimension_request_mode = "explicit"
 batch_size = 32
 max_concurrent = 5
 enable_cache = false
@@ -97,7 +98,7 @@ chats = []
 [episode]
 enabled = true
 generation_enabled = true
-pending_batch_size = 20
+pending_batch_size = 50
 pending_max_retry = 3
 max_paragraphs_per_call = 20
 max_chars_per_call = 6000
@@ -110,6 +111,7 @@ refresh_interval_minutes = 30
 active_window_hours = 72
 max_refresh_per_cycle = 50
 top_k_evidence = 12
+evidence_classification_max_tokens = 1200
 
 [memory]
 enabled = true
@@ -130,6 +132,17 @@ max_file_size_mb = 20
 max_paste_chars = 200000
 default_file_concurrency = 2
 default_chunk_concurrency = 4
+default_narrative_window_size = 1600
+default_narrative_overlap = 400
+default_factual_target_size = 1200
+max_chunk_chars = 3200
+
+[web.import.timeout]
+llm_call_seconds = 240
+process_poll_seconds = 1
+process_terminate_seconds = 5
+process_kill_seconds = 3
+convert_preflight_seconds = 20
 
 [web.tuning]
 enabled = true
@@ -299,6 +312,7 @@ python src/A_memorix/scripts/migrate_person_memory_points.py --help
 
 - 原因：现有向量库维度与当前 embedding 输出不一致
 - 处理：恢复原配置或重建向量数据后再启动
+- 若你希望继续强制请求 `embedding.dimension` 指定的输出维度，可将 `embedding.dimension_request_mode` 改为 `always`
 
 ### Q3: Web 页面打不开
 

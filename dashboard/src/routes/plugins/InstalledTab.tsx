@@ -1,16 +1,19 @@
 import type { GitStatus, MaimaiVersion, PluginInfo, PluginLoadProgress, PluginStatsData } from './types'
+import { getPluginType } from './types'
 import { PluginCard } from './PluginCard'
 
 interface InstalledTabProps {
   plugins: PluginInfo[]
   searchQuery: string
-  categoryFilter: string
+  pluginTypeFilter: string
   showCompatibleOnly: boolean
   gitStatus: GitStatus | null
   maimaiVersion: MaimaiVersion | null
   pluginStats: Record<string, PluginStatsData>
   loadProgress: PluginLoadProgress | null
+  likingPluginIds: Set<string>
   onInstall: (plugin: PluginInfo) => void
+  onLike: (plugin: PluginInfo) => void
   onUpdate: (plugin: PluginInfo) => void
   onUninstall: (plugin: PluginInfo) => void
   checkPluginCompatibility: (plugin: PluginInfo) => boolean
@@ -22,13 +25,15 @@ interface InstalledTabProps {
 export function InstalledTab({
   plugins,
   searchQuery,
-  categoryFilter,
+  pluginTypeFilter,
   showCompatibleOnly,
   gitStatus,
   maimaiVersion,
   pluginStats,
   loadProgress,
+  likingPluginIds,
   onInstall,
+  onLike,
   onUpdate,
   onUninstall,
   checkPluginCompatibility,
@@ -54,20 +59,19 @@ export function InstalledTab({
       plugin.manifest.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (plugin.manifest.keywords && plugin.manifest.keywords.some(k => k.toLowerCase().includes(searchQuery.toLowerCase())))
     
-    // 分类过滤
-    const matchesCategory = categoryFilter === 'all' ||
-      (plugin.manifest.categories && plugin.manifest.categories.includes(categoryFilter))
+    // 类型过滤
+    const matchesType = pluginTypeFilter === 'all' || getPluginType(plugin) === pluginTypeFilter
     
     // 兼容性过滤
     const matchesCompatibility = !showCompatibleOnly || 
       !maimaiVersion || 
       checkPluginCompatibility(plugin)
     
-    return matchesSearch && matchesCategory && matchesCompatibility
+    return matchesSearch && matchesType && matchesCompatibility
   })
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
       {filteredPlugins.map((plugin) => (
         <PluginCard
           key={plugin.id}
@@ -76,7 +80,9 @@ export function InstalledTab({
           maimaiVersion={maimaiVersion}
           pluginStats={pluginStats}
           loadProgress={loadProgress}
+          likingPluginIds={likingPluginIds}
           onInstall={onInstall}
+          onLike={onLike}
           onUpdate={onUpdate}
           onUninstall={onUninstall}
           checkPluginCompatibility={checkPluginCompatibility}
